@@ -1,5 +1,7 @@
 # vactor
 
+[简体中文文档 (Chinese README)](ReadmeCh.md)
+
 vactor is a high-performance, lightweight virtual actor framework that does not depend on any third-party libraries.
 
 ## Design
@@ -23,7 +25,7 @@ vactor is a high-performance, lightweight virtual actor framework that does not 
 
 ## Benchmark
 
-Benchmark [examples/benchmark/main.go](examples/benchmark/main.go) running on an i5-13400F processor (8 cores, 16 threads):
+[examples/benchmark/main.go](examples/benchmark/main.go) running on an i5-13400F processor (8 cores, 16 threads):
 ```sh
 go run ./examples/benchmark
 sent and processed 100000000 messages to 10000 actors in 4.7932951s
@@ -79,4 +81,4 @@ For more examples, see the [`examples`](examples) directory:
 
 ## License
 
-MIT
+MIT License. See [`LICENSE`](LICENSE) for details.
