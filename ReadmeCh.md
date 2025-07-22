@@ -1,6 +1,6 @@
 # vactor
 
-vactor 是一个高性能、轻量级的 虚拟actor 框架，支持消息发送、请求响应、事件分发、watch/notify 等功能。这是一个不依赖任何第三方库的单进程的实现，可以很容易集成到你的项目中。同时也给分布式扩展提供了支持，我这里有一个分布式的实现 [dvactor](https://github.com/kofplayer/dvactor) 。你也可以实现自己的分布式扩展。
+vactor 是一个高性能、轻量级的 虚拟actor 框架，不依赖任何第三方库。
 
 ## 设计
 
@@ -16,6 +16,10 @@ vactor 是一个高性能、轻量级的 虚拟actor 框架，支持消息发送
 - 事件监听与分发
 - Watch/Unwatch 机制
 - 高效队列与 ring buffer 实现
+
+## 分布式支持
+
+  项目本身不直接支持分布式，但是给分布式扩展提供了支持。我这里有一个分布式的实现 [dvactor](https://github.com/kofplayer/dvactor) 。你也可以实现自己的分布式扩展。
 
 ## 安装
 
@@ -41,7 +45,8 @@ func main() {
         return func(ctx vactor.EnvelopeContext) {
             switch m := ctx.GetMessage().(type) {
             case string:
-                ctx.LogDebug("Received message: %s", m)
+				self := ctx.GetActorRef()
+				ctx.LogDebug("actor %v-%v Received message: %s", self.GetActorType(), self.GetActorId(), m)
             }
         }
     })
@@ -66,4 +71,4 @@ func main() {
 
 ## License
 
-Apache License 2.0. 详情见 [`LICENSE`](LICENSE)。
+MIT License. 详情见 [`LICENSE`](LICENSE)。

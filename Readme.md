@@ -1,8 +1,8 @@
 # vactor
 
-vactor is a high-performance, lightweight virtual actor framework. It supports message sending, request/response, event dispatching, and watch/notify mechanisms. This is a single-process implementation that does not depend on any third-party libraries, making it easy to integrate into your project. It also provides support for distributed extensions; see my distributed implementation at [dvactor](https://github.com/kofplayer/dvactor). You can also implement your own distributed extension.
+vactor is a high-performance, lightweight virtual actor framework that does not depend on any third-party libraries.
 
-## Designd
+## Design
 
 - All actors always logically exist and cannot be actively created or destroyed.
 - When sending a message to an actor, if the actor has not been created, the system will automatically create it.
@@ -16,6 +16,10 @@ vactor is a high-performance, lightweight virtual actor framework. It supports m
 - Event listening and dispatching
 - Watch/Unwatch mechanism
 - Efficient queue and ring buffer implementation
+
+## Distributed Support
+
+  The project itself does not directly support distributed systems, but provides support for distributed extensions. There is a distributed implementation available at [dvactor](https://github.com/kofplayer/dvactor). You can also implement your own distributed extension.
 
 ## Installation
 
@@ -41,7 +45,8 @@ func main() {
         return func(ctx vactor.EnvelopeContext) {
             switch m := ctx.GetMessage().(type) {
             case string:
-                ctx.LogDebug("Received message: %s", m)
+                self := ctx.GetActorRef()
+                ctx.LogDebug("actor %v-%v Received message: %s", self.GetActorType(), self.GetActorId(), m)
             }
         }
     })
@@ -55,7 +60,7 @@ func main() {
 
 ## Examples
 
-See the [`examples`](examples) directory for more usage:
+For more examples, see the [`examples`](examples) directory:
 
 - [examples/hello/main.go](examples/hello/main.go): Basic message sending
 - [examples/send/main.go](examples/send/main.go): Sending messages inside and outside actors
@@ -66,4 +71,4 @@ See the [`examples`](examples) directory for more usage:
 
 ## License
 
-Apache License 2.0. See [`LICENSE`](LICENSE) for details.
+MIT License. See [`LICENSE`](LICENSE) for details.
