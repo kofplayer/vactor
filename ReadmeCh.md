@@ -21,6 +21,14 @@ vactor 是一个高性能、轻量级的 虚拟actor 框架，不依赖任何第
 
   项目本身不直接支持分布式，但是给分布式扩展提供了支持。我这里有一个分布式的实现 [dvactor](https://github.com/kofplayer/dvactor) 。你也可以实现自己的分布式扩展。
 
+## 性能测试
+
+性能测试 [examples/benchmark/main.go](examples/benchmark/main.go) 在8核16线程的i5-13400F处理器上运行结果：
+```sh
+go run ./examples/benchmark
+sent and processed 100000000 messages to 10000 actors in 4.7932951s
+```
+
 ## 安装
 
 ```sh
