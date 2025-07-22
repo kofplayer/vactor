@@ -296,14 +296,14 @@ func (a *actorContext) start() {
 				actorContext: a,
 				message:      &MsgOnStop{},
 			})
-			a.system.LogDebug("actor %#v stop", a.actorRef)
+			// a.system.LogDebug("actor %#v stop", a.actorRef)
 			a.group.mailbox.Enqueue(&envelopeStopedReport{
 				fromActorRef: a.actorRef,
 			})
 			a.system.wg.Done()
 		}()
 		a.lastestMsgTime = time.Now()
-		a.system.LogDebug("actor %#v start", a.actorRef)
+		// a.system.LogDebug("actor %#v start", a.actorRef)
 		a.onMessage(&envelopeContextBase{
 			actorContext: a,
 			message:      &MsgOnStart{},

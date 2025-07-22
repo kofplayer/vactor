@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/kofplayer/vactor"
@@ -32,9 +31,9 @@ func main() {
 				ctx.RequestAsync(responser, "req async", 0, func(msg interface{}, err error) {
 					switch rsp := msg.(type) {
 					case string:
-						fmt.Printf("async receive %#v\n", rsp)
+						ctx.LogDebug("async receive %#v\n", rsp)
 					default:
-						fmt.Printf("async Unexpected response type: %T\n", rsp)
+						ctx.LogDebug("async Unexpected response type: %T\n", rsp)
 					}
 				})
 
@@ -42,9 +41,9 @@ func main() {
 				msg, _ := ctx.Request(responser, "req sync", 0)
 				switch rsp := msg.(type) {
 				case string:
-					fmt.Printf("sync receive %#v\n", rsp)
+					ctx.LogDebug("sync receive %#v\n", rsp)
 				default:
-					fmt.Printf("sync Unexpected response type: %T\n", rsp)
+					ctx.LogDebug("sync Unexpected response type: %T\n", rsp)
 				}
 			}
 		}
@@ -56,9 +55,9 @@ func main() {
 	// outer request
 	rsp, err := system.Request(responser, "req outer", 0)
 	if err != nil {
-		fmt.Printf("request error: %v\n", err)
+		system.LogDebug("request error: %v\n", err)
 	} else {
-		fmt.Printf("request response: %v\n", rsp)
+		system.LogDebug("request response: %v\n", rsp)
 	}
 
 	time.Sleep(time.Second)

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/kofplayer/vactor"
@@ -21,7 +20,7 @@ func main() {
 				// inner watch
 				ctx.Watch(system.CreateActorRef(WatcheeType, "1"), wt)
 			case *vactor.MsgOnWatchMsg:
-				fmt.Printf("inner watch: %v\n", m.Message)
+				ctx.LogDebug("inner watch: %v\n", m.Message)
 
 				// inner unwatch
 				ctx.Unwatch(system.CreateActorRef(WatcheeType, "1"), wt)
@@ -52,7 +51,7 @@ func main() {
 			}
 			switch t := m.(*vactor.MsgOnWatchMsg).Message.(type) {
 			case string:
-				fmt.Printf("outer watch: %v\n", t)
+				system.LogDebug("outer watch: %v\n", t)
 			}
 
 			// outer unwatch

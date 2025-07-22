@@ -14,7 +14,8 @@ func main() {
 		return func(ctx vactor.EnvelopeContext) {
 			switch m := ctx.GetMessage().(type) {
 			case string:
-				ctx.LogDebug("Received message: %s", m)
+				self := ctx.GetActorRef()
+				ctx.LogDebug("actor %v-%v Received message: %s", self.GetActorType(), self.GetActorId(), m)
 			}
 		}
 	})
