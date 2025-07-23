@@ -1,12 +1,12 @@
-# vactor
+[简体中文文档](ReadmeCh.md)
 
-[简体中文文档 (Chinese README)](ReadmeCh.md)
+# vactor
 
 vactor is a high-performance, lightweight virtual actor framework that does not depend on any third-party libraries.
 
 ## Design
 
-- All actors always logically exist and cannot be actively created or destroyed.
+- All actors always exist logically and cannot be explicitly created or destroyed.
 - When sending a message to an actor, if the actor has not been created, the system will automatically create it.
 - If an actor is inactive for a long time (configurable), the system will automatically destroy it.
 
