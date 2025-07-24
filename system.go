@@ -193,7 +193,7 @@ func (s *system) Start() {
 		s.actorGroups[i] = newActorGroup(s)
 	}
 	s.systemId = s.config.SystemId
-	s.actorCreators[EventHubActorType] = func() Actor { return func(ctx EnvelopeContext) {} }
+	s.actorCreators[EventHubActorType] = func() Actor { return nil }
 	s.defaultStopInterval = s.config.DefaultStopInterval
 	s.tickInterval = s.config.TickInterval
 	if s.router == nil {

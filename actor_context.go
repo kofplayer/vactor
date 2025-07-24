@@ -287,12 +287,24 @@ func (a *actorContext) getNeedSaveCache() *actorContextCache {
 	return a.cache
 }
 
+func (a *actorContext) processMessage(ctx EnvelopeContext) {
+	if a.onMessage == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			a.system.LogError("actor %v processMessage panic: %v", a.actorRef, r)
+		}
+	}()
+	a.onMessage(ctx)
+}
+
 func (a *actorContext) start() {
 	a.system.wg.Add(1)
 
 	go func() {
 		defer func() {
-			a.onMessage(&envelopeContextBase{
+			a.processMessage(&envelopeContextBase{
 				actorContext: a,
 				message:      &MsgOnStop{},
 			})
@@ -304,7 +316,7 @@ func (a *actorContext) start() {
 		}()
 		a.lastestMsgTime = time.Now()
 		// a.system.LogDebug("actor %#v start", a.actorRef)
-		a.onMessage(&envelopeContextBase{
+		a.processMessage(&envelopeContextBase{
 			actorContext: a,
 			message:      &MsgOnStart{},
 		})
@@ -415,7 +427,7 @@ func (a *actorContext) start() {
 					}
 					for _, msg := range t.Messages {
 						ctx.message = msg
-						a.onMessage(ctx)
+						a.processMessage(ctx)
 					}
 					a.lastestMsgTime = time.Now()
 					continue
@@ -448,7 +460,7 @@ func (a *actorContext) start() {
 				if !isTick {
 					a.lastestMsgTime = time.Now()
 				}
-				a.onMessage(c)
+				a.processMessage(c)
 			}
 		}
 	}()
