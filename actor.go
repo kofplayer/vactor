@@ -53,7 +53,7 @@ type WatchType uint32
 type EventGroup string
 type EventId uint32
 
-type Router func(Envelope) error
+type Router func(Envelope) VAError
 
 type LogLevel int
 
@@ -95,11 +95,4 @@ type Logger interface {
 	LogError(format string, args ...interface{})
 	LogFatal(format string, args ...interface{})
 	LogPanic(format string, args ...interface{})
-}
-
-type TimeoutError struct {
-}
-
-func (e *TimeoutError) Error() string {
-	return "timeout"
 }

@@ -35,7 +35,7 @@ type System interface {
 	// msg: the message to send.
 	// timeout: maximum duration to wait for a response.
 	// Returns: the response message and an error if timeout or failure occurs.
-	Request(actorRef ActorRef, msg interface{}, timeout time.Duration) (interface{}, error)
+	Request(actorRef ActorRef, msg interface{}, timeout time.Duration) (interface{}, VAError)
 
 	// Watch subscribes to the notify of the specified actor.
 	// actorRef: reference to the actor to watch.
@@ -71,7 +71,7 @@ type System interface {
 	// actorRefs: list of actor references to send messages to.
 	// messages: list of messages to send.
 	// Returns: error if sending fails.
-	BatchSend(actorRefs []ActorRef, messages []interface{}) error
+	BatchSend(actorRefs []ActorRef, messages []interface{}) VAError
 
 	// CreateActorRef creates a reference to an actor. which system will be calculated automatically.
 	// actorType: the type identifier of the actor.
@@ -97,7 +97,7 @@ type System interface {
 	// LocalRouter is the default local message router. this function will be used for distributed framework.
 	// envelope: the message envelope to route.
 	// Returns: error if routing fails.
-	LocalRouter(envelope Envelope) error
+	LocalRouter(envelope Envelope) VAError
 }
 
 type SystemConfig struct {
@@ -121,8 +121,7 @@ func NewSystem(cfgFuncs ...SystemConfigFunc) System {
 	config := &SystemConfig{
 		DefaultStopInterval: time.Minute * 10,
 		TickInterval:        time.Second,
-		// actorCreators:       make(map[ActorType]func() Actor),
-		GroupCount: 0,
+		GroupCount:          0,
 	}
 	for _, f := range cfgFuncs {
 		if f != nil {
@@ -229,7 +228,7 @@ func (s *system) getActorGroup(actorRef ActorRef) *actorGroup {
 	return s.actorGroups[uint16(actorRef.GetGroupSlot()-1)%s.groupCount]
 }
 
-func (s *system) BatchSend(actorRefs []ActorRef, messages []interface{}) error {
+func (s *system) BatchSend(actorRefs []ActorRef, messages []interface{}) VAError {
 	if len(actorRefs) == 0 || len(messages) == 0 {
 		return nil
 	}
@@ -250,11 +249,11 @@ func (s *system) BatchSend(actorRefs []ActorRef, messages []interface{}) error {
 	})
 }
 
-func (s *system) sendEnvelope(msg Envelope) error {
+func (s *system) sendEnvelope(msg Envelope) VAError {
 	return s.router(msg)
 }
 
-func (s *system) LocalRouter(envelope Envelope) error {
+func (s *system) LocalRouter(envelope Envelope) VAError {
 	switch e := envelope.(type) {
 	case *EnvelopeBatchSend:
 		groups := make(map[*actorGroup][]ActorRef)
@@ -298,7 +297,7 @@ func (s *system) Send(actorRef ActorRef, msg interface{}) {
 	})
 }
 
-func (s *system) Request(actorRef ActorRef, msg interface{}, timeout time.Duration) (interface{}, error) {
+func (s *system) Request(actorRef ActorRef, msg interface{}, timeout time.Duration) (interface{}, VAError) {
 	c := make(chan *Response, 1)
 	s.sendEnvelope(&EnvelopeOuterRequest{
 		ToActorRef: actorRef,
@@ -310,7 +309,7 @@ func (s *system) Request(actorRef ActorRef, msg interface{}, timeout time.Durati
 		case r := <-c:
 			return r.Message, r.Error
 		case <-time.After(timeout):
-			return nil, &TimeoutError{}
+			return nil, NewTimeoutError()
 		}
 	} else {
 		r := <-c

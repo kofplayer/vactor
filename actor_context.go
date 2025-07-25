@@ -15,6 +15,7 @@ func newActorContext(group *actorGroup, actorRef ActorRef, mailbox *Queue[Envelo
 	creator, ok := group.system.actorCreators[actorType]
 	if !ok {
 		group.system.LogError("can not find actor type %v creator", actorType)
+		return nil
 	}
 	if cache == nil {
 		cache = &actorContextCache{
@@ -38,7 +39,7 @@ func newActorContext(group *actorGroup, actorRef ActorRef, mailbox *Queue[Envelo
 }
 
 type callbackInfo struct {
-	callback func(interface{}, error)
+	callback func(interface{}, VAError)
 	timeout  time.Duration
 	outtime  time.Time
 }
@@ -75,7 +76,7 @@ func getObjectAddr(f interface{}) uint64 {
 	return uint64(reflect.ValueOf(f).Pointer())
 }
 
-func (a *actorContext) RequestAsync(actorRef ActorRef, msg interface{}, timeout time.Duration, callback func(interface{}, error)) {
+func (a *actorContext) RequestAsync(actorRef ActorRef, msg interface{}, timeout time.Duration, callback func(interface{}, VAError)) {
 	a.callbackIdBase++
 	a.waittingAsyncCallbackInfos[a.callbackIdBase] = &callbackInfo{
 		callback: callback,
@@ -94,7 +95,7 @@ func (a *actorContext) RequestAsync(actorRef ActorRef, msg interface{}, timeout 
 	}
 }
 
-func (a *actorContext) Request(actorRef ActorRef, msg interface{}, timeout time.Duration) (interface{}, error) {
+func (a *actorContext) Request(actorRef ActorRef, msg interface{}, timeout time.Duration) (interface{}, VAError) {
 	err := a.system.sendEnvelope(&EnvelopeRequest{
 		FromActorRef: a.actorRef,
 		ToActorRef:   actorRef,
@@ -111,7 +112,7 @@ func (a *actorContext) Request(actorRef ActorRef, msg interface{}, timeout time.
 			return r.Message, r.Error
 		case <-time.After(timeout):
 			a.syncRspChan = make(chan *Response, 1)
-			return nil, &TimeoutError{}
+			return nil, NewTimeoutError()
 		}
 	} else {
 		r := <-a.syncRspChan
@@ -255,7 +256,7 @@ func (a *actorContext) FireEvent(eventGroup EventGroup, eventId EventId, message
 	})
 }
 
-func (a *actorContext) BatchSend(actorRefs []ActorRef, messages []interface{}) error {
+func (a *actorContext) BatchSend(actorRefs []ActorRef, messages []interface{}) VAError {
 	return a.system.BatchSend(actorRefs, messages)
 }
 
@@ -405,7 +406,7 @@ func (a *actorContext) start() {
 						tm := make(map[CallbackId]bool)
 						for id, info := range a.waittingAsyncCallbackInfos {
 							if info.timeout > 0 && info.outtime.Before(time.Now()) {
-								info.callback(nil, &TimeoutError{})
+								info.callback(nil, NewTimeoutError())
 								tm[id] = true
 							}
 						}

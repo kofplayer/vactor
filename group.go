@@ -78,6 +78,10 @@ func (m *actorGroup) processEnvelope(toActorRef ActorRef, envelopes Envelope) {
 			delete(m.actorCaches, *actorRefImpl)
 		}
 		actorCtx = newActorContext(m, toActorRef, actorMailbox, cache)
+		if actorCtx == nil {
+			delete(m.actorMailboxes, *actorRefImpl)
+			return
+		}
 		m.actorContexts[*actorRefImpl] = actorCtx
 		actorCtx.start()
 	}

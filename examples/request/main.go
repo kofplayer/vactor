@@ -28,7 +28,7 @@ func main() {
 			switch ctx.GetMessage().(type) {
 			case *vactor.MsgOnStart:
 				// inner sync request
-				ctx.RequestAsync(responser, "req async", 0, func(msg interface{}, err error) {
+				ctx.RequestAsync(responser, "req async", 0, func(msg interface{}, err vactor.VAError) {
 					switch rsp := msg.(type) {
 					case string:
 						ctx.LogDebug("async receive %#v\n", rsp)

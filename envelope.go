@@ -59,7 +59,7 @@ func (e *EnvelopeRequest) GetToActorRef() ActorRef {
 }
 
 type Response struct {
-	Error   error
+	Error   VAError
 	Message interface{}
 }
 

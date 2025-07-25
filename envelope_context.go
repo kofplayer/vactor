@@ -29,19 +29,19 @@ type EnvelopeContext interface {
 	// msg: the message to send.
 	// timeout: maximum duration to wait for a response.
 	// callback: function to handle the response message and error.
-	RequestAsync(actorRef ActorRef, msg interface{}, timeout time.Duration, callback func(interface{}, error))
+	RequestAsync(actorRef ActorRef, msg interface{}, timeout time.Duration, callback func(interface{}, VAError))
 
 	// Request sends a message to the specified actor and waits for a response or timeout.
 	// actorRef: the target actor reference.
 	// msg: the message to send.
 	// timeout: maximum duration to wait for a response.
 	// Returns: the response message and an error if timeout or failure occurs.
-	Request(actorRef ActorRef, msg interface{}, timeout time.Duration) (interface{}, error)
+	Request(actorRef ActorRef, msg interface{}, timeout time.Duration) (interface{}, VAError)
 
 	// Response sends a response message to the sender.
 	// msg: the response message.
 	// err: error to return, if any.
-	Response(msg interface{}, err error)
+	Response(msg interface{}, err VAError)
 
 	// Watch subscribes to notifications of the specified actor.
 	// actorRef: the actor to watch.
@@ -78,7 +78,7 @@ type EnvelopeContext interface {
 	// actorRefs: list of actor references to send messages to.
 	// messages: list of messages to send.
 	// Returns: error if sending fails.
-	BatchSend(actorRefs []ActorRef, messages []interface{}) error
+	BatchSend(actorRefs []ActorRef, messages []interface{}) VAError
 
 	// SetStopInterval sets the interval before the actor is automatically stopped if idle. actor receive any message (exclude tick message) will reset the interval.
 	// interval: the duration to set. zero is means never stop.
@@ -132,7 +132,7 @@ func (a *envelopeContextBase) LogPanic(format string, args ...interface{}) {
 	a.actorContext.system.logFunc(PanicLevel, format, args...)
 }
 
-func (a *envelopeContextBase) Response(msg interface{}, err error) {
+func (a *envelopeContextBase) Response(msg interface{}, err VAError) {
 	a.LogError("MsgContext.SendRsp called, this is not allowed")
 }
 
@@ -159,7 +159,7 @@ type envelopeContextRequstAsync struct {
 	doSendRsp       bool
 }
 
-func (a *envelopeContextRequstAsync) Response(msg interface{}, err error) {
+func (a *envelopeContextRequstAsync) Response(msg interface{}, err VAError) {
 	if a.fromActorRef == nil {
 		a.LogError("MsgContext.SendRsp called without a valid fromActorRef, this is not allowed")
 		return
@@ -187,7 +187,7 @@ type envelopeContextRequst struct {
 	doSendRsp bool
 }
 
-func (a *envelopeContextRequst) Response(msg interface{}, err error) {
+func (a *envelopeContextRequst) Response(msg interface{}, err VAError) {
 	if a.fromActorRef == nil {
 		a.LogError("MsgContext.SendRsp called without a valid fromActorRef, this is not allowed")
 		return
@@ -214,7 +214,7 @@ type envelopeContextOuterRequst struct {
 	rspChan   chan *Response
 }
 
-func (a *envelopeContextOuterRequst) Response(msg interface{}, err error) {
+func (a *envelopeContextOuterRequst) Response(msg interface{}, err VAError) {
 	if a.doSendRsp {
 		a.LogError("MsgContext.SendRsp called more than once, this is not allowed")
 		return
