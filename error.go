@@ -13,26 +13,20 @@ type VAError interface {
 	Code() ErrorCode
 }
 
-func NewTimeoutError() VAError {
-	return &timeoutError{}
+type vaError struct {
+	code ErrorCode
+}
+
+func (e *vaError) Code() ErrorCode {
+	return e.code
+}
+
+func (e *vaError) Error() string {
+	return ""
 }
 
 func NewVAError(errorCode ErrorCode) VAError {
-	switch errorCode {
-	case ErrorCodeTimeout:
-		return &timeoutError{}
-	default:
-		return nil
+	return &vaError{
+		code: errorCode,
 	}
-}
-
-type timeoutError struct {
-}
-
-func (e *timeoutError) Code() ErrorCode {
-	return ErrorCodeTimeout
-}
-
-func (e *timeoutError) Error() string {
-	return "timeout"
 }

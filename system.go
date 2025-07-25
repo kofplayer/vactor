@@ -309,7 +309,7 @@ func (s *system) Request(actorRef ActorRef, msg interface{}, timeout time.Durati
 		case r := <-c:
 			return r.Message, r.Error
 		case <-time.After(timeout):
-			return nil, NewTimeoutError()
+			return nil, NewVAError(ErrorCodeTimeout)
 		}
 	} else {
 		r := <-c

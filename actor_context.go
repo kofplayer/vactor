@@ -112,7 +112,7 @@ func (a *actorContext) Request(actorRef ActorRef, msg interface{}, timeout time.
 			return r.Message, r.Error
 		case <-time.After(timeout):
 			a.syncRspChan = make(chan *Response, 1)
-			return nil, NewTimeoutError()
+			return nil, NewVAError(ErrorCodeTimeout)
 		}
 	} else {
 		r := <-a.syncRspChan
@@ -406,7 +406,7 @@ func (a *actorContext) start() {
 						tm := make(map[CallbackId]bool)
 						for id, info := range a.waittingAsyncCallbackInfos {
 							if info.timeout > 0 && info.outtime.Before(time.Now()) {
-								info.callback(nil, NewTimeoutError())
+								info.callback(nil, NewVAError(ErrorCodeTimeout))
 								tm[id] = true
 							}
 						}
