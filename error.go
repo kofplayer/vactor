@@ -4,8 +4,7 @@ type ErrorCode int32
 
 const (
 	ErrorCodeSuccess     ErrorCode = 0
-	ErrorCodeNormal      ErrorCode = 1
-	ErrorCodeTimeout     ErrorCode = 2
+	ErrorCodeTimeout     ErrorCode = 1
 	ErrorCodeCustomStart ErrorCode = 100
 )
 
@@ -16,6 +15,15 @@ type VAError interface {
 
 func NewTimeoutError() VAError {
 	return &timeoutError{}
+}
+
+func NewVAError(errorCode ErrorCode) VAError {
+	switch errorCode {
+	case ErrorCodeTimeout:
+		return &timeoutError{}
+	default:
+		return nil
+	}
 }
 
 type timeoutError struct {
