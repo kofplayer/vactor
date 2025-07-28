@@ -3,9 +3,10 @@ package vactor
 type ErrorCode int32
 
 const (
-	ErrorCodeSuccess     ErrorCode = 0
-	ErrorCodeTimeout     ErrorCode = 1
-	ErrorCodeCustomStart ErrorCode = 100
+	ErrorCodeSuccess      ErrorCode = 0
+	ErrorCodeTimeout      ErrorCode = 1
+	ErrorCodeInvalidActor ErrorCode = 2
+	ErrorCodeCustomStart  ErrorCode = 100
 )
 
 type VAError interface {
@@ -22,7 +23,7 @@ func (e *vaError) Code() ErrorCode {
 }
 
 func (e *vaError) Error() string {
-	return ""
+	return "VaError"
 }
 
 func NewVAError(errorCode ErrorCode) VAError {

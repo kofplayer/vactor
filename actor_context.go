@@ -58,6 +58,7 @@ type actorContext struct {
 	stopInterval               time.Duration
 	onTickMsg                  *MsgOnTick
 	processeingRequestCount    int32
+	isInvalid                  bool
 }
 
 func (a *actorContext) GetActorRef() ActorRef {
@@ -265,6 +266,11 @@ func (a *actorContext) SetStopInterval(d time.Duration) {
 	a.stopInterval = d
 }
 
+func (a *actorContext) SetSelfInvalid() {
+	a.isInvalid = true
+	a.SetStopInterval(time.Second)
+}
+
 func (a *actorContext) CreateActorRef(actorType ActorType, actorId ActorId) ActorRef {
 	return a.system.CreateActorRef(actorType, actorId)
 }
@@ -289,7 +295,15 @@ func (a *actorContext) getNeedSaveCache() *actorContextCache {
 }
 
 func (a *actorContext) processMessage(ctx EnvelopeContext) {
-	if a.onMessage == nil {
+	if a.onMessage == nil || a.isInvalid {
+		switch ec := ctx.(type) {
+		case *envelopeContextRequstAsync:
+			ec.Response(nil, NewVAError(ErrorCodeInvalidActor))
+		case *envelopeContextRequst:
+			ec.Response(nil, NewVAError(ErrorCodeInvalidActor))
+		case *envelopeContextOuterRequst:
+			ec.Response(nil, NewVAError(ErrorCodeInvalidActor))
+		}
 		return
 	}
 	defer func() {

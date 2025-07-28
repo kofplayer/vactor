@@ -84,6 +84,13 @@ type EnvelopeContext interface {
 	// interval: the duration to set. zero is means never stop.
 	SetStopInterval(interval time.Duration)
 
+	// SetSelfInvalid marks the actor as invalid, and has following effects:
+	// - Actor will not receive any further messages.
+	// - All future request messages will be responded with an error.
+	// - Actor will be stopped after the stop interval.
+	// - After actor stopped. it can start again, and can receive message again.
+	SetSelfInvalid()
+
 	// CreateActorRef creates a reference to an actor. which system will be calculated automatically.
 	// actorType: the type identifier of the actor.
 	// actorId: the unique identifier of the actor.
