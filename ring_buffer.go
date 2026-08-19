@@ -122,6 +122,9 @@ func (rb *RingBuffer[T]) Count() int {
 }
 
 func (rb *RingBuffer[T]) Clear() {
+	for i := 0; i < rb.count; i++ {
+		rb.buffer[(rb.head+i)%rb.size] = rb.zero
+	}
 	rb.head = 0
 	rb.tail = 0
 	rb.count = 0

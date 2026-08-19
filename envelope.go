@@ -52,6 +52,7 @@ type EnvelopeRequest struct {
 	FromActorRef ActorRef
 	ToActorRef   ActorRef
 	Message      interface{}
+	RequestId    CallbackId
 }
 
 func (e *EnvelopeRequest) GetToActorRef() ActorRef {
@@ -67,6 +68,7 @@ type EnvelopeResponse struct {
 	*Response
 	FromActorRef ActorRef
 	ToActorRef   ActorRef
+	RequestId    CallbackId
 }
 
 func (e *EnvelopeResponse) GetToActorRef() ActorRef {

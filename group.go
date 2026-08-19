@@ -86,10 +86,14 @@ func (m *actorGroup) processEnvelope(toActorRef ActorRef, envelopes Envelope) {
 		actorCtx.start()
 	}
 	if t, ok := envelopes.(*EnvelopeResponse); ok {
-		select {
-		case actorCtx.syncRspChan <- t.Response:
-		default:
-			m.system.LogError("actor sync response channel is full, message dropped")
+		if t.Response == nil {
+			m.system.LogError("actor %v receive sync response with nil payload, dropped", toActorRef)
+		} else {
+			select {
+			case actorCtx.syncRspChan <- t:
+			default:
+				m.system.LogError("actor sync response channel is full, message dropped")
+			}
 		}
 	} else {
 		actorMailbox.Enqueue(envelopes)
@@ -111,10 +115,12 @@ func (m *actorGroup) onActorStoped(actorRef ActorRef) {
 			delete(m.actorMailboxes, *actorRefImpl)
 		} else {
 			actorCtx := newActorContext(m, actorRef, actorMailbox, cache)
-			m.actorContexts[*actorRefImpl] = actorCtx
-			actorCtx.start()
-			if cache != nil {
-				cache = nil
+			if actorCtx != nil {
+				m.actorContexts[*actorRefImpl] = actorCtx
+				actorCtx.start()
+				if cache != nil {
+					cache = nil
+				}
 			}
 		}
 	}

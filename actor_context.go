@@ -32,7 +32,7 @@ func newActorContext(group *actorGroup, actorRef ActorRef, mailbox *Queue[Envelo
 		waittingAsyncCallbackInfos: make(map[CallbackId]*callbackInfo),
 		onMessage:                  creator(),
 		callbackIdBase:             0,
-		syncRspChan:                make(chan *Response, 1),
+		syncRspChan:                make(chan *EnvelopeResponse, 1),
 		stopInterval:               group.system.defaultStopInterval,
 		onTickMsg:                  &MsgOnTick{},
 	}
@@ -54,7 +54,9 @@ type actorContext struct {
 	waittingAsyncCallbackInfos map[CallbackId]*callbackInfo
 	cache                      *actorContextCache
 	callbackIdBase             CallbackId
-	syncRspChan                chan *Response
+	requestIdBase              CallbackId
+	waitingSyncRequestId       CallbackId
+	syncRspChan                chan *EnvelopeResponse
 	stopInterval               time.Duration
 	onTickMsg                  *MsgOnTick
 	processeingRequestCount    int32
@@ -97,27 +99,44 @@ func (a *actorContext) RequestAsync(actorRef ActorRef, msg interface{}, timeout 
 }
 
 func (a *actorContext) Request(actorRef ActorRef, msg interface{}, timeout time.Duration) (interface{}, VAError) {
+	a.requestIdBase++
+	requestId := a.requestIdBase
+	a.waitingSyncRequestId = requestId
 	err := a.system.sendEnvelope(&EnvelopeRequest{
 		FromActorRef: a.actorRef,
 		ToActorRef:   actorRef,
 		Message:      msg,
+		RequestId:    requestId,
 	})
 
 	if err != nil {
+		a.waitingSyncRequestId = 0
 		return nil, err
 	}
 
 	if timeout > 0 {
-		select {
-		case r := <-a.syncRspChan:
-			return r.Message, r.Error
-		case <-time.After(timeout):
-			a.syncRspChan = make(chan *Response, 1)
-			return nil, NewVAError(ErrorCodeTimeout)
+		deadline := time.After(timeout)
+		for {
+			select {
+			case r := <-a.syncRspChan:
+				if r.RequestId == a.waitingSyncRequestId {
+					a.waitingSyncRequestId = 0
+					return r.Message, r.Error
+				}
+				a.system.LogWarn("actor %v drop stale sync response, requestId %v not match waiting %v", a.actorRef, r.RequestId, a.waitingSyncRequestId)
+			case <-deadline:
+				a.waitingSyncRequestId = 0
+				return nil, NewVAError(ErrorCodeTimeout)
+			}
 		}
-	} else {
+	}
+	for {
 		r := <-a.syncRspChan
-		return r.Message, r.Error
+		if r.RequestId == a.waitingSyncRequestId {
+			a.waitingSyncRequestId = 0
+			return r.Message, r.Error
+		}
+		a.system.LogWarn("actor %v drop stale sync response, requestId %v not match waiting %v", a.actorRef, r.RequestId, a.waitingSyncRequestId)
 	}
 }
 
@@ -401,6 +420,7 @@ func (a *actorContext) start() {
 							message:      t.Message,
 							fromActorRef: t.FromActorRef,
 						},
+						requestId: t.RequestId,
 					}
 					a.processeingRequestCount++
 				case *EnvelopeOuterRequest:

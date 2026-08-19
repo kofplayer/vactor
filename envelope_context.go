@@ -191,6 +191,7 @@ func (a *envelopeContextRequstAsync) Response(msg interface{}, err VAError) {
 
 type envelopeContextRequst struct {
 	*envelopeContextBase
+	requestId CallbackId
 	doSendRsp bool
 }
 
@@ -211,6 +212,7 @@ func (a *envelopeContextRequst) Response(msg interface{}, err VAError) {
 		},
 		FromActorRef: a.actorRef,
 		ToActorRef:   a.fromActorRef,
+		RequestId:    a.requestId,
 	})
 	a.processeingRequestCount--
 }

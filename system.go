@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -150,6 +151,8 @@ type system struct {
 	groupCount           uint16
 	wg                   sync.WaitGroup
 	ticker               *time.Ticker
+	stopChan             chan struct{}
+	stopped              atomic.Bool
 	defaultStopInterval  time.Duration
 	tickInterval         time.Duration
 	router               Router
@@ -209,15 +212,20 @@ func (s *system) Start() {
 		group.start()
 	}
 	if s.tickInterval > 0 {
+		s.stopChan = make(chan struct{})
 		s.ticker = time.NewTicker(s.tickInterval)
 		go func() {
 			for {
-				_, ok := <-s.ticker.C
-				if !ok {
-					break
-				}
-				for i := range s.actorGroups {
-					s.actorGroups[i].mailbox.Enqueue(s.envelopeTick)
+				select {
+				case <-s.stopChan:
+					return
+				case _, ok := <-s.ticker.C:
+					if !ok {
+						return
+					}
+					for i := range s.actorGroups {
+						s.actorGroups[i].mailbox.Enqueue(s.envelopeTick)
+					}
 				}
 			}
 		}()
@@ -376,7 +384,7 @@ func (s *system) SetCreateActorRefExFunc(createActorRefExFunc CreateActorRefExFu
 }
 
 func (s *system) IsRunning() bool {
-	return s.config == nil
+	return s.config == nil && !s.stopped.Load()
 }
 
 func (s *system) defaultCreateActorRefEx(systemId SystemId, actorType ActorType, actorId ActorId) ActorRef {
@@ -404,7 +412,15 @@ func (s *system) defaultCreateActorRefEx(systemId SystemId, actorType ActorType,
 }
 
 func (s *system) Stop() {
-	s.ticker.Stop()
+	if !s.stopped.CompareAndSwap(false, true) {
+		return
+	}
+	if s.ticker != nil {
+		s.ticker.Stop()
+	}
+	if s.stopChan != nil {
+		close(s.stopChan)
+	}
 	for i := range s.actorGroups {
 		s.actorGroups[i].mailbox.Close()
 	}
