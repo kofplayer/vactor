@@ -79,6 +79,8 @@ const ActorTypeStart    ActorType = 10  // 业务类型下限
 
 `ActorRef` 接口：`GetActorType/GetActorId/GetSystemId/GetGroupSlot`；默认实现 `ActorRefImpl`（结构体值可作 map key）。
 
+`HashActorId(actorId) uint32`（[actor.go](../actor.go)）：ActorId 的 32 位 **FNV-1a** 哈希。单机取低 16 位作 `GroupSlot`（0 归一到 1）；dvactor 用 `hash % 节点数` 选放置节点、再用商做分片——**两处共用同一函数**，改动它会同时改变本机落组与跨节点放置（属跨版本行为契约，详见[架构文档](architecture.md)）。
+
 ## 错误（[error.go](../error.go)）
 
 `VAError` = `error` + `Code() ErrorCode`。内置：`ErrorCodeSuccess(0)`、`ErrorCodeTimeout(1)`、`ErrorCodeInvalidActor(2)`、`ErrorCodeSystemNotStarted(3)`、`ErrorCodeHandlerPanic(4)`；业务自定义从 `ErrorCodeCustomStart(100)` 起。`Error()` 返回 `VaError(code=N)`，判错应比较 `Code()`。dvactor 侧码表见 [cluster.md](../../dvactor/docs/cluster.md)。

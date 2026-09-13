@@ -33,7 +33,11 @@ BatchSend/Notify（多收件人）先在 LocalRouter 按 group 拆分投递，gr
 
 ## GroupSlot 哈希（寻址分片）
 
-`defaultCreateActorRefEx`（`system.go`）：对 ActorId 字符串**从尾部向前**逐字节做 2 路交替 XOR，得到 16bit 值作为 `GroupSlot`（为 0 时置 1）。落组公式：`(GroupSlot-1) % groupCount`。这保证同一 actor 的消息永远进同一个 group 的 goroutine，天然串行。
+`HashActorId`（`actor.go`）：对 ActorId 做 32 位 **FNV-1a** 哈希。`defaultCreateActorRefEx`（`system.go`）取该哈希的**低 16 位**作为 `GroupSlot`（为 0 时置 1），落组公式 `(GroupSlot-1) % groupCount`——同一 actor 的消息因此永远进同一个 group 的 goroutine，天然串行。dvactor 复用同一函数：用 `hash % 节点数` 选放置节点，再用商做分片。
+
+> **为什么不用更省事的交替 XOR**：vactor 与 dvactor 早期实现都是"从尾部向前、按位置交替 XOR 进 2/4 个字节桶"。实测（2 万个结构化 id、16 个 group）它把 `user1..user20000` 压进仅 **762** 个槽位（96% 的 id 与其他 id 撞槽），最重桶达最轻桶的 2.5 倍（变异系数 0.37）；`room-N-player-M` 更差（0.60）。而结构化 id 恰是业务常态。改用 FNV-1a 后唯一槽位 17586、变异系数 0.006。
+>
+> **升级注意**：哈希一变，同一 actor 的本机落组与**跨节点放置**都会改变。集群必须**整体停机升级，不可滚动升级**——否则新旧节点对同一 actor 的放置结论不一致，可能同时存在两个实例。
 
 ## 生命周期
 
