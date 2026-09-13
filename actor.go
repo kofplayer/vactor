@@ -46,7 +46,10 @@ const (
 	ActorTypeStart ActorType = 10
 )
 
-type CallbackId uint32
+// CallbackId 同时用作异步回调标识与同步请求/响应序号。
+// 取 uint64：单调递增的序号在 32 位下会于 40 亿次请求后回绕，
+// 长跑进程可能因此把新回调与残留条目混淆。
+type CallbackId uint64
 
 type WatchType uint32
 

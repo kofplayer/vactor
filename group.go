@@ -1,5 +1,7 @@
 package vactor
 
+import "time"
+
 func newActorGroup(system *system) *actorGroup {
 	return &actorGroup{
 		system:         system,
@@ -54,8 +56,13 @@ func (m *actorGroup) processBatch(envelopes []Envelope) {
 			m.onActorStoped(t.fromActorRef)
 			continue
 		case *envelopeTick:
+			// 只向"确实需要 tick"的 actor 投递（见 actorContext.needTick）：
+			// 否则 10 万 actor 就是每秒 10 万次入队 + 唤醒，即使它们无事可做。
+			now := time.Now()
 			for _, ctx := range m.actorContexts {
-				ctx.mailbox.Enqueue(envelope)
+				if ctx.needTick(now) {
+					ctx.mailbox.Enqueue(envelope)
+				}
 			}
 			continue
 		case *EnvelopeBatchSend:
@@ -79,10 +86,19 @@ func (m *actorGroup) processBatch(envelopes []Envelope) {
 }
 
 func (m *actorGroup) processEnvelope(toActorRef ActorRef, envelopes Envelope) {
+	if toActorRef == nil {
+		m.system.LogError("actor group received envelope with nil target actor, dropped")
+		return
+	}
 	if toActorRef.GetSystemId() != m.system.systemId {
 		m.system.LogPanic("actor key system %v not fit, need %v", toActorRef.GetSystemId(), m.system.systemId)
 	}
-	actorRefImpl := toActorRef.(*ActorRefImpl)
+	actorRefImpl, isImpl := toActorRef.(*ActorRefImpl)
+	if !isImpl {
+		// 仅支持框架自建的 ActorRef；外部自定义实现无法作为 map key 与序列化载体
+		m.system.LogError("actor group received unsupported ActorRef implementation %T, dropped", toActorRef)
+		return
+	}
 
 	// 同步响应只投递给"正在等待"的 actor：目标 actor 若已回收，说明请求方早已超时
 	// 或已放弃，响应无处可投。此时不能为了投递它而重新激活一个 context（会留下
@@ -121,6 +137,16 @@ func (m *actorGroup) processEnvelope(toActorRef ActorRef, envelopes Envelope) {
 		actorMailbox = NewQueue[Envelope]()
 		m.actorMailboxes[*actorRefImpl] = actorMailbox
 	}
+	// 背压：慢消费者会让 mailbox 无界增长。达到上限直接丢弃并告警，
+	// 而不是把内存吃满（0 表示不限制，保持旧行为）。
+	if depth := actorMailbox.Len(); m.system.maxMailboxDepth > 0 && depth >= m.system.maxMailboxDepth {
+		m.system.LogError("actor %v mailbox depth %d reached limit %d, message dropped",
+			toActorRef, depth, m.system.maxMailboxDepth)
+		return
+	} else if m.system.mailboxHighWaterMark > 0 && depth >= m.system.mailboxHighWaterMark {
+		m.system.LogWarn("actor %v mailbox depth %d exceeds high water mark %d",
+			toActorRef, depth, m.system.mailboxHighWaterMark)
+	}
 	actorCtx, ok := m.actorContexts[*actorRefImpl]
 	if !ok {
 		cache, ok := m.actorCaches[*actorRefImpl]
@@ -139,7 +165,11 @@ func (m *actorGroup) processEnvelope(toActorRef ActorRef, envelopes Envelope) {
 }
 
 func (m *actorGroup) onActorStoped(actorRef ActorRef) {
-	actorRefImpl := actorRef.(*ActorRefImpl)
+	actorRefImpl, isImpl := actorRef.(*ActorRefImpl)
+	if !isImpl {
+		m.system.LogError("onActorStoped: unsupported ActorRef implementation %T, ignored", actorRef)
+		return
+	}
 	actorCtx, ok := m.actorContexts[*actorRefImpl]
 	var cache *actorContextCache
 	if ok {

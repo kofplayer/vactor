@@ -116,6 +116,14 @@ type SystemConfig struct {
 
 	// LogFunc: the function to use for logging messages.
 	LogFunc LogFunc
+
+	// MailboxHighWaterMark: actor mailbox 深度达到该值即记 Warn（只告警不丢弃）。
+	// 0 表示不告警。用于观测慢消费者导致的积压。
+	MailboxHighWaterMark int
+
+	// MaxMailboxDepth: actor mailbox 深度上限，达到上限的消息会被丢弃并记 Error，
+	// 避免慢消费者导致 mailbox 无界增长直至 OOM。0 表示不限制（保持旧行为）。
+	MaxMailboxDepth int
 }
 
 func NewSystem(cfgFuncs ...SystemConfigFunc) System {
@@ -156,6 +164,8 @@ type system struct {
 	started              atomic.Bool
 	defaultStopInterval  time.Duration
 	tickInterval         time.Duration
+	mailboxHighWaterMark int
+	maxMailboxDepth      int
 	router               Router
 	envelopeTick         *envelopeTick
 	config               *SystemConfig
@@ -213,6 +223,8 @@ func (s *system) Start() {
 	s.actorCreators[EventHubActorType] = func() Actor { return nil }
 	s.defaultStopInterval = s.config.DefaultStopInterval
 	s.tickInterval = s.config.TickInterval
+	s.mailboxHighWaterMark = s.config.MailboxHighWaterMark
+	s.maxMailboxDepth = s.config.MaxMailboxDepth
 	if s.router == nil {
 		s.router = s.LocalRouter
 	}
@@ -320,7 +332,14 @@ func (s *system) LocalRouter(envelope Envelope) VAError {
 			}
 		}
 	default:
-		group := s.getActorGroup(envelope.GetToActorRef())
+		toActorRef := envelope.GetToActorRef()
+		if toActorRef == nil {
+			// 缺少目标的信封（畸形跨节点包 / 调用方漏填）：丢弃而不是解引用 panic
+			s.LogError("local router received envelope with nil target actor, dropped")
+			dropped = true
+			break
+		}
+		group := s.getActorGroup(toActorRef)
 		if !group.mailbox.Enqueue(envelope) {
 			dropped = true
 		}

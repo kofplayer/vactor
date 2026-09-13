@@ -85,6 +85,12 @@ type EnvelopeContext interface {
 	// interval: the duration to set. zero is means never stop.
 	SetStopInterval(interval time.Duration)
 
+	// SetTickEnabled 声明本 actor 是否需要周期性的 MsgOnTick。
+	// 默认开启（保持兼容）。关闭后框架仅在确有需要时（存在待处理的异步回调、
+	// 或闲置回收条件已满足）才继续投递 tick——纯空闲的 actor 不再被每秒唤醒。
+	// enabled: false 表示不再需要周期 tick。
+	SetTickEnabled(enabled bool)
+
 	// SetSelfInvalid marks the actor as invalid, and has following effects:
 	// - Actor will not receive any further messages.
 	// - All future request messages will be responded with an error.
@@ -141,6 +147,11 @@ func (a *envelopeContextBase) LogFatal(format string, args ...interface{}) {
 func (a *envelopeContextBase) LogPanic(format string, args ...interface{}) {
 	a.actorContext.system.logFunc(PanicLevel, format, args...)
 	panic(fmt.Sprintf(format, args...))
+}
+
+// SetTickEnabled 实现 EnvelopeContext：关闭后仅在框架需要时投递 tick。
+func (a *envelopeContextBase) SetTickEnabled(enabled bool) {
+	a.actorContext.setTickEnabled(enabled)
 }
 
 func (a *envelopeContextBase) Response(msg interface{}, err VAError) {

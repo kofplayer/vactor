@@ -28,7 +28,7 @@ func newActorContext(group *actorGroup, actorRef ActorRef, mailbox *Queue[Envelo
 			outerWatcherss: make(map[WatchType]map[*Queue[interface{}]]bool),
 		}
 	}
-	return &actorContext{
+	ctx := &actorContext{
 		system:                    group.system,
 		group:                     group,
 		actorRef:                  actorRef,
@@ -41,6 +41,39 @@ func newActorContext(group *actorGroup, actorRef ActorRef, mailbox *Queue[Envelo
 		stopInterval:              group.system.defaultStopInterval,
 		onTickMsg:                 &MsgOnTick{},
 	}
+	now := time.Now()
+	ctx.latestMsgTime = now
+	ctx.lastActiveNano.Store(now.UnixNano())
+	ctx.stopIntervalNano.Store(int64(ctx.stopInterval))
+	return ctx
+}
+
+// touch 刷新"最近活跃时间"及其原子镜像（原子副本供 group 无锁粗筛）。
+func (a *actorContext) touch(now time.Time) {
+	a.latestMsgTime = now
+	a.lastActiveNano.Store(now.UnixNano())
+}
+
+// setTickEnabled 记录本 actor 是否仍需周期性 MsgOnTick。
+func (a *actorContext) setTickEnabled(enabled bool) {
+	a.tickDisabled.Store(!enabled)
+}
+
+// needTick 判断本次 tick 是否需要投递给该 actor。
+// 原实现每 tick 向所有存活 actor 各投一份，10 万 actor 就是每秒 10 万次入队与
+// goroutine 唤醒，即便它们无事可做。关闭 tick 的 actor 仅在框架确有需要时
+// （有待处理的异步回调、或闲置回收条件已满足）才继续投递。
+func (a *actorContext) needTick(now time.Time) bool {
+	if !a.tickDisabled.Load() {
+		return true // 未声明关闭：保持旧行为
+	}
+	if a.pendingAsyncCallback.Load() > 0 {
+		return true
+	}
+	if si := a.stopIntervalNano.Load(); si > 0 {
+		return a.lastActiveNano.Load()+si <= now.UnixNano()
+	}
+	return false
 }
 
 type callbackInfo struct {
@@ -67,6 +100,13 @@ type actorContext struct {
 	onTickMsg                 *MsgOnTick
 	processingRequestCount    int32
 	isInvalid                 bool
+
+	// 以下字段是上面那些"仅 actor goroutine 访问"的状态的原子镜像，
+	// 供 group 在投递 tick 前做无锁粗筛（group 与 actor 在不同 goroutine 上）。
+	lastActiveNano       atomic.Int64
+	stopIntervalNano     atomic.Int64
+	pendingAsyncCallback atomic.Int32
+	tickDisabled         atomic.Bool
 }
 
 // pendingRequestContext 由 Request 类消息上下文实现：
@@ -95,6 +135,7 @@ func (a *actorContext) RequestAsync(actorRef ActorRef, msg interface{}, timeout 
 		outtime:  time.Now().Add(timeout),
 		timeout:  timeout,
 	}
+	a.pendingAsyncCallback.Add(1)
 	err := a.system.sendEnvelope(&EnvelopeRequestAsync{
 		FromActorRef:    a.actorRef,
 		ToActorRef:      actorRef,
@@ -105,6 +146,7 @@ func (a *actorContext) RequestAsync(actorRef ActorRef, msg interface{}, timeout 
 	if err != nil {
 		// 发送失败：立即删除回调登记并同步回调错误，避免条目残留导致 actor 无法回收
 		delete(a.waitingAsyncCallbackInfos, a.callbackIdBase)
+		a.pendingAsyncCallback.Add(-1)
 		callback(nil, err)
 	}
 }
@@ -171,18 +213,27 @@ func (a *actorContext) Unwatch(actorRef ActorRef, watchType WatchType) {
 }
 
 func (a *actorContext) addWatcher(actorRef ActorRef, watchType WatchType) {
+	w, isImpl := actorRef.(*ActorRefImpl)
+	if !isImpl {
+		a.system.LogError("actor %v ignore watch from unsupported ActorRef %T", a.actorRef, actorRef)
+		return
+	}
 	watchers, ok := a.cache.watcherss[watchType]
 	if !ok {
 		watchers = make(map[ActorRefImpl]bool)
 		a.cache.watcherss[watchType] = watchers
 	}
-	watchers[*actorRef.(*ActorRefImpl)] = true
+	watchers[*w] = true
 }
 
 func (a *actorContext) removeWatcher(actorRef ActorRef, watchType WatchType) {
+	actorRefImpl, isImpl := actorRef.(*ActorRefImpl)
+	if !isImpl {
+		a.system.LogError("actor %v ignore unwatch from unsupported ActorRef %T", a.actorRef, actorRef)
+		return
+	}
 	watchers, ok := a.cache.watcherss[watchType]
 	if ok {
-		actorRefImpl := actorRef.(*ActorRefImpl)
 		if _, ok := watchers[*actorRefImpl]; ok {
 			delete(watchers, *actorRefImpl)
 			if len(watchers) == 0 {
@@ -292,8 +343,9 @@ func (a *actorContext) BatchSend(actorRefs []ActorRef, messages []interface{}) V
 }
 
 func (a *actorContext) SetStopInterval(d time.Duration) {
-	a.latestMsgTime = time.Now()
+	a.touch(time.Now())
 	a.stopInterval = d
+	a.stopIntervalNano.Store(int64(d))
 }
 
 func (a *actorContext) SetSelfInvalid() {
@@ -365,7 +417,7 @@ func (a *actorContext) start() {
 			})
 			a.system.wg.Done()
 		}()
-		a.latestMsgTime = time.Now()
+		a.touch(time.Now())
 		a.processMessage(&envelopeContextBase{
 			actorContext: a,
 			message:      &MsgOnStart{},
@@ -432,11 +484,12 @@ func (a *actorContext) processBatch(msgs []Envelope) (stop bool) {
 			}
 			a.processingRequestCount++
 		case *EnvelopeResponseAsync:
-			a.latestMsgTime = time.Now()
+			a.touch(time.Now())
 			if callbackInfo, ok := a.waitingAsyncCallbackInfos[t.CallbackId]; ok {
 				if a.instanceId == t.CallbackAddress {
 					a.invokeCallbackSafely(callbackInfo.callback, t.Response.Message, t.Response.Error)
 					delete(a.waitingAsyncCallbackInfos, t.CallbackId)
+					a.pendingAsyncCallback.Add(-1)
 				} else {
 					a.system.LogWarn("%v receive rsp with unknown callbackAddress: %v", a.actorRef, t.CallbackAddress)
 				}
@@ -477,6 +530,7 @@ func (a *actorContext) processBatch(msgs []Envelope) (stop bool) {
 				}
 				for id := range tm {
 					delete(a.waitingAsyncCallbackInfos, id)
+					a.pendingAsyncCallback.Add(-1)
 				}
 			}
 			c = &envelopeContextBase{
@@ -495,7 +549,7 @@ func (a *actorContext) processBatch(msgs []Envelope) (stop bool) {
 				ctx.message = msg
 				a.processMessage(ctx)
 			}
-			a.latestMsgTime = time.Now()
+			a.touch(time.Now())
 			continue
 		case *EnvelopeNotify:
 			switch t.NotifyType {
@@ -522,11 +576,11 @@ func (a *actorContext) processBatch(msgs []Envelope) (stop bool) {
 			}
 		case *EnvelopeFireNotify:
 			a.notify(t.WatchType, t.Message, t.NotifyType)
-			a.latestMsgTime = time.Now()
+			a.touch(time.Now())
 			continue
 		}
 		if !isTick {
-			a.latestMsgTime = time.Now()
+			a.touch(time.Now())
 		}
 		a.processMessage(c)
 	}
