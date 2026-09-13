@@ -2,19 +2,49 @@ name: ci
 on:
   push:
   pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: '1.24'
+
       - name: build
         run: go build ./...
+
       - name: vet
         run: go vet ./...
+
       - name: gofmt
         run: test -z "$(gofmt -l . | tee /dev/stderr)"
-      - name: test (race)
-        run: go test -race -timeout 10m ./...
+
+      - name: lint
+        # 首次引入先只观察：出现告警时按输出修复，稳定后再去掉 continue-on-error。
+        continue-on-error: true
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+
+      - name: test (race + coverage)
+        # 覆盖率只统计库代码：examples 与 testutil 不参与（它们 0% 会拉低整体口径）
+        run: |
+          pkgs=$(go list ./... | grep -v -E '/(examples|testutil)(/|$)')
+          go test -race -timeout 10m -coverprofile=coverage.out $pkgs
+
+      - name: coverage gate (>= 95%)
+        run: |
+          go tool cover -func=coverage.out | tail -1
+          pct=$(go tool cover -func=coverage.out | tail -1 | awk '{print $NF}' | tr -d '%')
+          if awk -v c="$pct" 'BEGIN{exit !(c < 95)}'; then
+            echo "::error::statement coverage ${pct}% is below the 95% gate"
+            exit 1
+          fi
+          echo "coverage ${pct}% >= 95%"
