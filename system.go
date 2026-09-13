@@ -459,14 +459,9 @@ func (s *system) IsRunning() bool {
 func (s *system) defaultCreateActorRefEx(systemId SystemId, actorType ActorType, actorId ActorId) ActorRef {
 	// 这里刻意不校验 actorType 下限：CreateActorRef 也用于 EventHubActorType(1)
 	// 这类保留类型，业务类型的下限校验放在 RegisterActorType。
-	groupSlot := GroupSlot(0)
-	hash := [2]uint8{0, 0}
-	str := string(actorId)
-	endIndex := len(str) - 1
-	for i := range endIndex + 1 {
-		hash[i%2] ^= str[endIndex-i]
-	}
-	groupSlot = GroupSlot((uint16(hash[1]) << 8) | uint16(hash[0]))
+	// 取 32 位 FNV-1a 的低 16 位作分片槽位（0 归一到 1）。与 dvactor 的跨节点
+	// 放置共用 HashActorId，保证同一 actor 在两层上的落点一致。
+	groupSlot := GroupSlot(HashActorId(actorId) & 0xFFFF)
 	if groupSlot == 0 {
 		groupSlot = 1
 	}
