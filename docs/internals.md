@@ -24,9 +24,10 @@
 
 - 每轮 `DequeueAll` 批量取走全部积压消息后逐条处理，取出即置 nil 帮助 GC。
 - `EnvelopeWatch`/`EnvelopeOuterWatch` 不进 `onMessage`，直接更新 watcher 表（保证先于业务消息生效）。
-- `EnvelopeResponseAsync` 也不进 `onMessage`：按 `CallbackId` 找到回调直接执行，并用 `CallbackAddress`（actorContext 指针地址）校验——防止 actor 回收重建后旧响应打到新实例。
-- `processeingRequestCount` 统计未完成的入向 Request（Request/RequestAsync），未归零前 actor 不会因闲置回收（避免同步响应丢失）。
-- 同步 `Request` 的响应匹配由 actor goroutine 自己完成：group 只把带 `RequestId` 的 `EnvelopeResponse` 塞进 `syncRspChan`（不读 actor 状态，无跨 goroutine 共享变量），actor 侧比对 `waitingSyncRequestId`，不匹配的迟到响应直接丢弃。该字段因此只是普通 `uint32`。
+- `EnvelopeResponseAsync` 也不进 `onMessage`：按 `CallbackId` 找到回调直接执行，并用 `CallbackAddress`（actorContext 的进程内唯一递增实例 ID）校验——防止 actor 回收重建后旧响应打到新实例（不再使用指针地址，避免地址复用导致 ABA 错配）。回调执行带 recover，用户回调 panic 只记日志。
+- `processingRequestCount` 统计未完成的入向 Request（Request/RequestAsync），未归零前 actor 不会因闲置回收（避免同步响应丢失）。若处理请求 panic 且用户未 Response，框架代为回 `ErrorCodeHandlerPanic` 保证计数归零、请求方不悬挂。
+- 信封分批处理（`processBatch`），整批 recover（防护语义见 [architecture.md](architecture.md)）：单个异常信封最多损失本批剩余消息并记日志，goroutine 继续运行。group 侧（[group.go](../group.go) `processBatch`）同理。
+- 同步 `Request` 的响应匹配由 actor goroutine 自己完成：group 只把带 `RequestId` 的 `EnvelopeResponse` 塞进 `syncRspChan`（不读 actor 状态，无跨 goroutine 共享变量），actor 侧比对 `waitingSyncRequestId`，不匹配的迟到响应直接丢弃。该字段因此只是普通 `uint32`。`System.Request`/`ctx.Request` 的超时使用可 Stop 的 `time.Timer`（非 `time.After`），发送失败（含未 Start）立即返回错误而不等待。
 
 ## Watcher 缓存与 actor 复活
 
@@ -43,10 +44,10 @@
 
 ## System.Start 序列（[system.go](../system.go)）
 
-1. 定 groupCount（默认 NumCPU）并创建所有 group；
+1. 定 groupCount（默认值见 [API 参考](api-reference.md)）并创建所有 group；
 2. 注入 `EventHubActorType` 的 nil creator；
 3. router 缺省为 `LocalRouter`，createActorRefExFunc 缺省为本地哈希；
-4. `config` 置 nil —— `IsRunning()` 就靠 `config == nil` 判断，此后所有"仅启动前"的配置方法失效；
+4. `config` 置 nil、`started` 置位 —— `IsRunning()` = `config == nil && !stopped`；`started` 守卫使所有"仅启动前"的配置方法在启动后（含 Stop 后）持续失效，双重 `Start` 被拒绝并记日志；
 5. 启动各 group goroutine；TickInterval>0 时启动 ticker goroutine 定期向各 group mailbox 投 tick。
 
 `Stop()`：停 ticker → 关闭所有 group mailbox → group 消费完退出时关闭所有 actor mailbox → actor 循环退出 → `wg.Wait()`。
@@ -55,4 +56,3 @@
 
 - `ActorRefImpl` 被直接类型断言使用（`toActorRef.(*ActorRefImpl)`），自定义 ActorRef 实现会 panic——分布式扩展也应复用 `ActorRefImpl`（dvactor 正是如此）。
 - `GetWatcheeActorRef` 类工具依赖 ActorId 字符串编码约定（dvactor 侧，见 [dvactor/docs/proxies.md](../../dvactor/docs/proxies.md)）。
-- `System.Request` 的 timeout 用 `time.After` 实现，高频调用注意定时器开销。

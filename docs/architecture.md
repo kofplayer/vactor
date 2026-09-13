@@ -38,9 +38,9 @@ BatchSend/Notify（多收件人）先在 LocalRouter 按 group 拆分投递，gr
 ## 生命周期
 
 1. **激活**：group 处理信封时发现 actor 无 context → 创建 → goroutine 启动 → 先收到 `MsgOnStart`。
-2. **运行**：每收到一条非 tick 消息刷新 `lastestMsgTime`。
+2. **运行**：每收到一条非 tick 消息刷新 `latestMsgTime`。
 3. **Tick**：System 的 ticker（默认 1s）向每个 group mailbox 投一个 `envelopeTick`，group 再扇出到每个 actor mailbox。actor 处理 tick 时检查：
-   - 若 `processeingRequestCount <= 0`、无待处理异步回调、`stopInterval > 0` 且闲置超时 → goroutine 退出（回收）。
+   - 若 `processingRequestCount <= 0`、无待处理异步回调、`stopInterval > 0` 且闲置超时 → goroutine 退出（回收）。
    - 同时处理超时的 RequestAsync 回调（回调收到 `ErrorCodeTimeout`）。
    - 否则向 actor 投递 `MsgOnTick`（可在 actor 内做周期任务，如示例中用 `ctx.Notify` 推 watch）。
 4. **回收**：goroutine 退出前收到 `MsgOnStop`，然后向 group mailbox 投 `envelopeStopedReport`；group 将 watcher cache 存入 `actorCaches`，若 mailbox 中还有积压消息则立即重建 context 继续处理。
@@ -50,8 +50,8 @@ BatchSend/Notify（多收件人）先在 LocalRouter 按 group 拆分投递，gr
 
 - actor 的 `onMessage` 在**单 goroutine** 内串行执行 → actor 内部状态无需加锁。
 - 每个 actor 独占 goroutine（非共享线程池），`ctx.Request`（同步）只是阻塞本 actor 的 goroutine，不影响其他 actor。
-- 同步 Request 的响应走 `syncRspChan`（容量 1）直达，不进 mailbox（见 `group.go` 的 `processEnvelope` 对 `EnvelopeResponse` 的特判）。group 只投递不校验；`RequestId` 比对在 actor goroutine 内完成，迟到响应由 actor 丢弃。
-- `processMessage` 带 recover，actor 内 panic 只记错误日志，不会拖垮系统。
+- 同步 Request 的响应经 `syncRspChan` 直达 actor goroutine，不进 mailbox；匹配与迟到丢弃机制见 [internals.md](internals.md)。
+- `processMessage` 与批量处理均带 recover：actor 内 panic 只记错误日志（请求类消息自动回 `ErrorCodeHandlerPanic`），异常信封不会拖垮 actor、group 或进程。`ctx.LogPanic` 记日志后 panic，同样被批量 recover 捕获。
 
 ## 事件总线
 

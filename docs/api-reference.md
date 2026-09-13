@@ -12,14 +12,14 @@
 | `GroupCount` | 0 → NumCPU | actor 分组数 |
 | `DefaultStopInterval` | 10min | actor 闲置自动回收时间；0 = 永不回收 |
 | `TickInterval` | 1s | tick 周期；≤0 关闭 tick（同时关闭闲置回收检查） |
-| `LogFunc` | stdout 打印 | 自定义日志 |
+| `LogFunc` | stdout 打印 | 自定义日志（仅 Start 后生效；Start 前的日志走默认 stdout 实现） |
 
 ## System 接口（[system.go](../system.go)）
 
 | 方法 | 说明 |
 |------|------|
-| `RegisterActorType(type, creator)` | 注册 actor 类型；`type ≥ ActorTypeStart(10)`；仅 Start 前 |
-| `Start()` / `Stop()` / `IsRunning()` | 启动（创建 group、ticker）/ 优雅停止（关 mailbox、等 WaitGroup）/ 运行态 |
+| `RegisterActorType(type, creator)` | 注册 actor 类型；`type ≥ ActorTypeStart(10)`；仅 Start 前（重复注册记 Warn，新 creator 覆盖旧的） |
+| `Start()` / `Stop()` / `IsRunning()` | 启动（创建 group、ticker；双重 Start 被拒绝）/ 优雅停止（关 mailbox、等 WaitGroup；不可重启）/ 运行态。Start 前发送消息返回 `ErrorCodeSystemNotStarted` |
 | `Send(ref, msg)` | 单向消息，无返回 |
 | `Request(ref, msg, timeout) (interface{}, VAError)` | 系统外同步请求；`timeout ≤ 0` 表示无限等待 |
 | `Watch(ref, watchType, queue)` / `Unwatch(...)` | 系统外 watch，通知投递到 `Queue[interface{}]`（消息为 `*MsgOnWatchMsg`） |
@@ -74,4 +74,4 @@ const ActorTypeStart    ActorType = 10  // 业务类型下限
 
 ## 错误（[error.go](../error.go)）
 
-`VAError` = `error` + `Code() ErrorCode`。内置：`ErrorCodeSuccess(0)`、`ErrorCodeTimeout(1)`、`ErrorCodeInvalidActor(2)`；业务自定义从 `ErrorCodeCustomStart(100)` 起。注意 `vaError.Error()` 固定返回 `"VaError"`，判错应比较 `Code()`。
+`VAError` = `error` + `Code() ErrorCode`。内置：`ErrorCodeSuccess(0)`、`ErrorCodeTimeout(1)`、`ErrorCodeInvalidActor(2)`、`ErrorCodeSystemNotStarted(3)`、`ErrorCodeHandlerPanic(4)`；业务自定义从 `ErrorCodeCustomStart(100)` 起。`Error()` 返回 `VaError(code=N)`，判错应比较 `Code()`。dvactor 侧码表见 [cluster.md](../../dvactor/docs/cluster.md)。
