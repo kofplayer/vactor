@@ -229,6 +229,9 @@ func TestSystemLogMethods(t *testing.T) {
 			mu.Unlock()
 		}
 		sc.TickInterval = 0
+		// DefaultStopInterval 归零：否则「关了 tick 却设了回收时间」会在 Start 时
+		// 多记一条配置告警，干扰本用例对「5 个日志方法各一条」的断言。
+		sc.DefaultStopInterval = 0
 	})
 	system.RegisterActorType(ActorTypeStart+1, func() Actor { return func(EnvelopeContext) {} })
 	system.Start()

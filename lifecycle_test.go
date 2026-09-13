@@ -578,3 +578,33 @@ func TestSetTickEnabledStillRecyclesIdleActor(t *testing.T) {
 		return col.Stops() >= 1
 	})
 }
+
+// TickInterval<=0 却设置了闲置回收时间，属于自相矛盾的配置：tick 是回收检查与
+// 异步超时扫描的唯一时机，该组合下回收永不生效。Start 必须记 Warn 提示。
+func TestStartWarnsWhenTickDisabledButStopIntervalSet(t *testing.T) {
+	ts := testutil.NewSystem(t,
+		func(s vactor.System) {
+			s.RegisterActorType(240, func() vactor.Actor { return func(vactor.EnvelopeContext) {} })
+		},
+		testutil.WithTickInterval(0),
+		testutil.WithStopInterval(time.Minute),
+	)
+	if !ts.LogContains("disables the tick loop") {
+		t.Fatal("expected a warning when TickInterval<=0 while DefaultStopInterval>0")
+	}
+	if !ts.IsRunning() {
+		t.Fatal("conflicting config should still start the system")
+	}
+
+	// 反向：tick 开启时不出现该告警（同一套断言必须能区分两种配置）
+	ts2 := testutil.NewSystem(t,
+		func(s vactor.System) {
+			s.RegisterActorType(241, func() vactor.Actor { return func(vactor.EnvelopeContext) {} })
+		},
+		testutil.WithTickInterval(10*time.Millisecond),
+		testutil.WithStopInterval(time.Minute),
+	)
+	if ts2.LogContains("disables the tick loop") {
+		t.Fatal("no warning expected when the tick loop is enabled")
+	}
+}
