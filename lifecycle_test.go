@@ -409,3 +409,172 @@ func TestSelfInvalidRespondsToAllRequestKinds(t *testing.T) {
 		t.Fatalf("inner async got %v", got)
 	}
 }
+
+// mailbox 深度上限：慢消费者导致积压时，超过上限的消息被丢弃并记 Error，
+// 而不是让 mailbox 无界增长。
+func TestActorMailboxDepthLimitDropsExcess(t *testing.T) {
+	const limit = 4
+	release := make(chan struct{})
+	col := &testutil.Collector{}
+	ts := testutil.NewSystem(t,
+		func(s vactor.System) {
+			s.RegisterActorType(220, func() vactor.Actor {
+				return func(ctx vactor.EnvelopeContext) {
+					if _, ok := ctx.GetMessage().(string); !ok {
+						return
+					}
+					<-release // 阻塞，制造 mailbox 积压
+					col.Observe(ctx)
+				}
+			})
+		},
+		testutil.WithMaxMailboxDepth(limit),
+		testutil.WithTickInterval(10*time.Millisecond),
+	)
+	ref := ts.CreateActorRef(220, "a")
+	ts.Send(ref, "first")
+	time.Sleep(80 * time.Millisecond) // 让 actor 取走第一条并阻塞
+
+	for i := 0; i < 30; i++ {
+		ts.Send(ref, i)
+	}
+	testutil.WaitFor(t, 3*time.Second, "mailbox limit logged", func() bool {
+		return ts.LogContains("reached limit")
+	})
+	close(release)
+	// 被丢弃的消息不会进入 actor：总数不超过 上限 + 1（已在处理中的那条）
+	testutil.WaitFor(t, 3*time.Second, "actor drains remaining backlog", func() bool {
+		return col.Len() >= 1
+	})
+	time.Sleep(200 * time.Millisecond)
+	if got := col.Len(); got > limit+1 {
+		t.Fatalf("actor received %d messages, want <= %d (limit+1)", got, limit+1)
+	}
+	if !ts.IsRunning() {
+		t.Fatal("system should survive mailbox drops")
+	}
+}
+
+// mailbox 高水位：只告警不丢弃（消息全部送达）。
+func TestActorMailboxHighWaterMarkWarnsOnly(t *testing.T) {
+	const mark = 2
+	release := make(chan struct{})
+	col := &testutil.Collector{}
+	ts := testutil.NewSystem(t,
+		func(s vactor.System) {
+			s.RegisterActorType(221, func() vactor.Actor {
+				return func(ctx vactor.EnvelopeContext) {
+					if _, ok := ctx.GetMessage().(string); !ok {
+						return
+					}
+					<-release
+					col.Observe(ctx)
+				}
+			})
+		},
+		testutil.WithMailboxHighWaterMark(mark),
+		testutil.WithTickInterval(10*time.Millisecond),
+	)
+	ref := ts.CreateActorRef(221, "a")
+	ts.Send(ref, "first")
+	time.Sleep(80 * time.Millisecond)
+	for i := 0; i < 6; i++ {
+		ts.Send(ref, "m") // 必须与 actor 约定的消息类型一致（string），否则被忽略
+	}
+	testutil.WaitFor(t, 3*time.Second, "high water mark warned", func() bool {
+		return ts.LogContains("exceeds high water mark")
+	})
+	close(release)
+	// 全部消息都必须送达（高水位不丢弃）
+	testutil.WaitFor(t, 3*time.Second, "all messages delivered", func() bool {
+		return col.Len() >= 7
+	})
+}
+
+// SetTickEnabled(false)：纯空闲 actor 不再被每秒唤醒（收不到 MsgOnTick）。
+func TestSetTickEnabledSkipsIdleTicks(t *testing.T) {
+	ticks := make(chan struct{}, 64)
+	ts := testutil.NewSystem(t,
+		func(s vactor.System) {
+			s.RegisterActorType(230, func() vactor.Actor {
+				return func(ctx vactor.EnvelopeContext) {
+					switch ctx.GetMessage().(type) {
+					case *vactor.MsgOnStart:
+						ctx.SetTickEnabled(false)
+					case *vactor.MsgOnTick:
+						select {
+						case ticks <- struct{}{}:
+						default:
+						}
+					}
+				}
+			})
+		},
+		testutil.WithTickInterval(10*time.Millisecond),
+	)
+	ts.Send(ts.CreateActorRef(230, "a"), "wake")
+	time.Sleep(200 * time.Millisecond) // 等 actor 启动并声明关闭 tick
+	// 关闭后 10ms 一个 tick，200ms 窗口内本应收到约 20 个
+	testutil.NoReceive(t, ticks, 200*time.Millisecond, "idle actor should not receive ticks")
+	if !ts.IsRunning() {
+		t.Fatal("system should stay running")
+	}
+}
+
+// 关闭 tick 不会破坏框架自身依赖 tick 的能力：未完成的异步请求仍会被扫描超时。
+func TestSetTickEnabledStillScansAsyncTimeout(t *testing.T) {
+	got := make(chan string, 8)
+	ts := testutil.NewSystem(t, func(s vactor.System) {
+		s.RegisterActorType(231, func() vactor.Actor {
+			return func(ctx vactor.EnvelopeContext) {
+				if _, ok := ctx.GetMessage().(*vactor.MsgOnStart); !ok {
+					return
+				}
+				ctx.SetTickEnabled(false)
+				// 目标 actor 永不响应，回调超时后必须被框架扫出来
+				ctx.RequestAsync(ctx.CreateActorRef(232, "void"), "q", 50*time.Millisecond,
+					func(_ interface{}, err vactor.VAError) {
+						if err != nil && err.Code() == vactor.ErrorCodeTimeout {
+							got <- "async-timeout"
+							return
+						}
+						got <- "unexpected"
+					})
+			}
+		})
+		s.RegisterActorType(232, func() vactor.Actor {
+			return func(vactor.EnvelopeContext) {}
+		})
+	}, testutil.WithTickInterval(10*time.Millisecond))
+
+	ts.Send(ts.CreateActorRef(231, "a"), "go")
+	if v := testutil.WaitChan(t, got, 3*time.Second, "async callback timeout"); v != "async-timeout" {
+		t.Fatalf("got %q", v)
+	}
+}
+
+// 关闭 tick 的 actor 若设置了闲置回收间隔，到期后仍会被回收（tick 照常投递）。
+func TestSetTickEnabledStillRecyclesIdleActor(t *testing.T) {
+	col := &testutil.Collector{}
+	ts := testutil.NewSystem(t,
+		func(s vactor.System) {
+			s.RegisterActorType(233, func() vactor.Actor {
+				return func(ctx vactor.EnvelopeContext) {
+					switch ctx.GetMessage().(type) {
+					case *vactor.MsgOnStart:
+						col.Observe(ctx)
+						ctx.SetTickEnabled(false)
+						ctx.SetStopInterval(60 * time.Millisecond)
+					case *vactor.MsgOnStop:
+						col.Observe(ctx)
+					}
+				}
+			})
+		},
+		testutil.WithTickInterval(10*time.Millisecond),
+	)
+	ts.Send(ts.CreateActorRef(233, "a"), "wake")
+	testutil.WaitFor(t, 3*time.Second, "idle actor recycled despite tick disabled", func() bool {
+		return col.Stops() >= 1
+	})
+}

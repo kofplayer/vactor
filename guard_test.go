@@ -235,3 +235,75 @@ func TestPanicInInnerRequestAutoResponds(t *testing.T) {
 		t.Fatalf("inner async got %v, want %v", got, vactor.ErrorCodeHandlerPanic)
 	}
 }
+
+// fakeActorRef 是非框架自建的 ActorRef 实现，用于验证框架的防御性行为。
+type fakeActorRef struct {
+	actorType vactor.ActorType
+	actorId   vactor.ActorId
+	systemId  vactor.SystemId
+	groupSlot vactor.GroupSlot
+}
+
+func (f fakeActorRef) GetActorType() vactor.ActorType { return f.actorType }
+func (f fakeActorRef) GetActorId() vactor.ActorId     { return f.actorId }
+func (f fakeActorRef) GetSystemId() vactor.SystemId   { return f.systemId }
+func (f fakeActorRef) GetGroupSlot() vactor.GroupSlot { return f.groupSlot }
+
+// 目标为 nil 的信封（调用方漏填 / 畸形跨节点包）：返回错误并记日志，不得 panic。
+func TestLocalRouterNilTargetDropped(t *testing.T) {
+	ts := testutil.NewSystem(t, func(s vactor.System) {})
+	if err := ts.LocalRouter(&vactor.EnvelopeSend{ToActorRef: nil, Message: "x"}); err == nil {
+		t.Fatal("envelope with nil target should report a delivery error")
+	}
+	testutil.WaitFor(t, 2*time.Second, "nil target logged", func() bool {
+		return ts.LogContains("nil target actor")
+	})
+	if !ts.IsRunning() {
+		t.Fatal("system should survive a nil-target envelope")
+	}
+}
+
+// 自定义 ActorRef 实现：丢弃并记日志，不得 panic（此前是类型断言 panic 路径）。
+func TestUnsupportedActorRefImplementationDropped(t *testing.T) {
+	col := &testutil.Collector{}
+	ts := testutil.NewSystem(t, func(s vactor.System) {
+		s.RegisterActorType(210, col.Creator())
+	})
+	// SystemId 与本机一致（能过 systemId 校验），但不是 *ActorRefImpl
+	bad := fakeActorRef{actorType: 210, actorId: "x", systemId: 0, groupSlot: 1}
+	ts.LocalRouter(&vactor.EnvelopeSend{ToActorRef: bad, Message: "m"})
+	testutil.WaitFor(t, 2*time.Second, "unsupported ActorRef logged", func() bool {
+		return ts.LogContains("unsupported ActorRef implementation")
+	})
+	if col.Len() != 0 {
+		t.Fatal("message to an unsupported ActorRef must not be delivered")
+	}
+	if !ts.IsRunning() {
+		t.Fatal("system should survive an unsupported ActorRef")
+	}
+}
+
+// 自定义 ActorRef 作为 watcher：忽略该订阅并记日志，不得 panic。
+func TestWatchFromUnsupportedActorRefIgnored(t *testing.T) {
+	col := &testutil.Collector{}
+	ts := testutil.NewSystem(t, func(s vactor.System) {
+		s.RegisterActorType(211, col.Creator())
+	})
+	target := ts.CreateActorRef(211, "t")
+	ts.Send(target, "wake")
+	col.WaitForMessages(t, 1, 2*time.Second, "target activated")
+
+	bad := fakeActorRef{actorType: 211, actorId: "bad", systemId: 0, groupSlot: 1}
+	ts.LocalRouter(&vactor.EnvelopeWatch{FromActorRef: bad, ToActorRef: target, WatchType: 1, IsWatch: true})
+	testutil.WaitFor(t, 2*time.Second, "unsupported watcher logged", func() bool {
+		return ts.LogContains("ignore watch from unsupported ActorRef")
+	})
+	// 同样的自定义引用退订也不得 panic
+	ts.LocalRouter(&vactor.EnvelopeWatch{FromActorRef: bad, ToActorRef: target, WatchType: 1, IsWatch: false})
+	testutil.WaitFor(t, 2*time.Second, "unsupported unwatch logged", func() bool {
+		return ts.LogContains("ignore unwatch from unsupported ActorRef")
+	})
+	if !ts.IsRunning() {
+		t.Fatal("system should survive unsupported watcher refs")
+	}
+}
