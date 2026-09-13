@@ -41,6 +41,8 @@ hello（最小用法）· send · [request](examples/request/main.go)（内/外�
 
 `go test ./...` 覆盖队列/环形缓冲、生命周期与回收缓存、消息与批量语义、同步异步请求、watch/event、并发顺序与 panic 防护。测试辅助工具在 [testutil/](testutil/testutil.go)（`NewSystem`、`Collector`、`WaitFor/WaitChan/NoReceive`、`FreePorts`），dvactor 的测试同样复用。
 
+**基准**：标准基准在 [bench_test.go](bench_test.go)（同步/异步请求往返、发送吞吐）与 [tick_bench_test.go](tick_bench_test.go)（tick 扇出对比）。本地对比用 `go test -run '^$' -bench . -benchmem ./`；CI 只做冒烟（`-benchtime 1x`），不设性能阈值。
+
 ## 深入阅读（L2）
 
 - [docs/architecture.md](docs/architecture.md) — 调度模型、消息流、生命周期、并发与 panic 防护语义
