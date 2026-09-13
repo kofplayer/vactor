@@ -39,10 +39,12 @@ BatchSend/Notify（多收件人）先在 LocalRouter 按 group 拆分投递，gr
 
 1. **激活**：group 处理信封时发现 actor 无 context → 创建 → goroutine 启动 → 先收到 `MsgOnStart`。
 2. **运行**：每收到一条非 tick 消息刷新 `latestMsgTime`。
-3. **Tick**：System 的 ticker（默认 1s）向每个 group mailbox 投一个 `envelopeTick`，group 再扇出到每个 actor mailbox。actor 处理 tick 时检查：
+3. **Tick**：System 的 ticker（默认 1s）向每个 group mailbox 投一个 `envelopeTick`，group 逐个 actor 判定后再扇出。actor 处理 tick 时检查：
    - 若 `processingRequestCount <= 0`、无待处理异步回调、`stopInterval > 0` 且闲置超时 → goroutine 退出（回收）。
    - 同时处理超时的 RequestAsync 回调（回调收到 `ErrorCodeTimeout`）。
    - 否则向 actor 投递 `MsgOnTick`（可在 actor 内做周期任务，如示例中用 `ctx.Notify` 推 watch）。
+
+   > **扇出优化**：group 先用无锁原子字段粗筛（`actorContext.needTick`），只向"确实需要"的 actor 投递——未声明关闭 tick 的 actor、存在未完成异步回调的 actor、以及闲置回收条件已满足的 actor。声明 `SetTickEnabled(false)` 的纯空闲 actor 不再每秒被入队与唤醒（2 万 actor 的 tick 扇出开销约 30.8ms → 11.1ms）。
 4. **回收**：goroutine 退出前收到 `MsgOnStop`，然后向 group mailbox 投 `envelopeStopedReport`；group 将 watcher cache 存入 `actorCaches`，若 mailbox 中还有积压消息则立即重建 context 继续处理。
 5. **SetSelfInvalid**：置 `isInvalid`，此后所有消息被拒（Request 类立即回 `ErrorCodeInvalidActor`），stopInterval 缩为 1 秒触发快速回收；之后仍可被新消息重新激活。
 

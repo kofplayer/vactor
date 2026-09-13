@@ -12,6 +12,8 @@
 | `GroupCount` | 0 → NumCPU | actor 分组数 |
 | `DefaultStopInterval` | 10min | actor 闲置自动回收时间；0 = 永不回收 |
 | `TickInterval` | 1s | tick 周期；≤0 关闭 tick（同时关闭闲置回收检查） |
+| `MailboxHighWaterMark` | 0（不告警） | actor mailbox 深度达到该值记 Warn（只告警不丢弃） |
+| `MaxMailboxDepth` | 0（不限制） | actor mailbox 深度上限；达到上限的新消息被丢弃并记 Error（慢消费者背压） |
 | `LogFunc` | stdout 打印 | 自定义日志（仅 Start 后生效；Start 前的日志走默认 stdout 实现） |
 
 ## System 接口（[system.go](../system.go)）
@@ -45,6 +47,7 @@ actor 内可用，包含 Logger 全部方法，另有：
 | `Notify(watchType, msg)` | 向本 actor 的所有 watcher（内部+外部）广播 |
 | `ListenEvent` / `UnlistenEvent` / `FireEvent` | actor 内事件订阅/触发；事件以 `*MsgOnEventMsg` 送达 |
 | `BatchSend(refs, msgs)` | 同 System.BatchSend |
+| `SetTickEnabled(enabled)` | 声明是否需要周期性 `MsgOnTick`；默认 true。关闭后仅在有未完成异步回调、或闲置回收条件已满足时才投递 tick（纯空闲 actor 不再被每秒唤醒） |
 | `SetStopInterval(d)` | 覆盖本 actor 的闲置回收时间；0 = 永不回收 |
 | `SetSelfInvalid()` | 自我失效：拒收后续消息、Request 立即回错、1s 后回收（生命周期见架构文档） |
 | `CreateActorRef` / `CreateActorRefEx` | 同 System |
@@ -56,7 +59,7 @@ actor 内可用，包含 Logger 全部方法，另有：
 |------|------|
 | `*MsgOnStart` | actor goroutine 启动后第一条 |
 | `*MsgOnStop` | actor 回收前最后一条 |
-| `*MsgOnTick` | 每个 TickInterval 一条（未触发回收时） |
+| `*MsgOnTick` | 每个 TickInterval 一条（未触发回收时）；不需要周期任务的 actor 可用 `SetTickEnabled(false)` 声明，避免被无谓唤醒 |
 | `*MsgOnWatchMsg` | watch 通知：含 `ActorRef`（被观察者）、`WatchType`、`Message` |
 | `*MsgOnEventMsg` | 事件通知：含 `EventGroup`、`EventId`、`Message` |
 
