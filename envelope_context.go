@@ -1,6 +1,7 @@
 package vactor
 
 import (
+	"fmt"
 	"time"
 )
 
@@ -48,7 +49,7 @@ type EnvelopeContext interface {
 	// watchType: type of notification to watch for.
 	Watch(actorRef ActorRef, watchType WatchType)
 
-	// Unwatch unsubscribes from notifications of the specified actor.
+	// Unwatch unsubscribes from the notify of the specified actor.
 	// actorRef: the actor to unwatch.
 	// watchType: type of notification to stop watching.
 	Unwatch(actorRef ActorRef, watchType WatchType)
@@ -59,18 +60,18 @@ type EnvelopeContext interface {
 	Notify(watchType WatchType, msg interface{})
 
 	// ListenEvent subscribes to a specific event.
-	// eventGroup: the group/category of the event. events in the same group are strictly orderly.
+	// eventGroup: the group of the event. events in the same group are strictly orderly.
 	// eventId: the identifier of the event.
 	ListenEvent(eventGroup EventGroup, eventId EventId)
 
 	// UnlistenEvent unsubscribes from a specific event.
-	// eventGroup: the group/category of the event. events in the same group are strictly orderly.
+	// eventGroup: the group of the event. events in the same group are strictly orderly.
 	// eventId: the identifier of the event.
 	UnlistenEvent(eventGroup EventGroup, eventId EventId)
 
 	// FireEvent triggers an event to all listeners.
-	// eventGroup: the group/category of the event. events in the same group are strictly orderly.
-	// eventId: the identifier of the event.
+	// eventGroup: the group of the event.
+	// eventId: the identifier of the event. events in the same group are strictly orderly.
 	// message: the event message to send.
 	FireEvent(eventGroup EventGroup, eventId EventId, message interface{})
 
@@ -135,12 +136,15 @@ func (a *envelopeContextBase) LogFatal(format string, args ...interface{}) {
 	a.actorContext.system.logFunc(FatalLevel, format, args...)
 }
 
+// LogPanic 与 System.LogPanic 语义一致：记录日志后 panic。
+// panic 会被 actor/group 的批量 recover 捕获，只损失当前消息，不拖垮系统。
 func (a *envelopeContextBase) LogPanic(format string, args ...interface{}) {
 	a.actorContext.system.logFunc(PanicLevel, format, args...)
+	panic(fmt.Sprintf(format, args...))
 }
 
 func (a *envelopeContextBase) Response(msg interface{}, err VAError) {
-	a.LogError("MsgContext.SendRsp called, this is not allowed")
+	a.LogError("EnvelopeContext.Response called on a non-request message, this is not allowed")
 }
 
 func (a *envelopeContextBase) GetFromActorRef() ActorRef {
@@ -159,20 +163,22 @@ type envelopeContextNotify struct {
 	*envelopeContextBase
 }
 
-type envelopeContextRequstAsync struct {
+type envelopeContextRequestAsync struct {
 	*envelopeContextBase
 	callbackId      CallbackId
 	callbackAddress uint64
 	doSendRsp       bool
 }
 
-func (a *envelopeContextRequstAsync) Response(msg interface{}, err VAError) {
+func (a *envelopeContextRequestAsync) Response(msg interface{}, err VAError) {
 	if a.fromActorRef == nil {
-		a.LogError("MsgContext.SendRsp called without a valid fromActorRef, this is not allowed")
+		a.LogError("EnvelopeContext.Response called without a valid fromActorRef, this is not allowed")
+		// 响应无处可投，但仍要归还计数：否则 actor 永远满足不了回收条件（泄漏）
+		a.processingRequestCount--
 		return
 	}
 	if a.doSendRsp {
-		a.LogError("MsgContext.SendRsp called more than once, this is not allowed")
+		a.LogError("EnvelopeContext.Response called more than once, this is not allowed")
 		return
 	}
 	a.doSendRsp = true
@@ -186,22 +192,33 @@ func (a *envelopeContextRequstAsync) Response(msg interface{}, err VAError) {
 		CallbackId:      a.callbackId,
 		CallbackAddress: a.callbackAddress,
 	})
-	a.processeingRequestCount--
+	a.processingRequestCount--
 }
 
-type envelopeContextRequst struct {
+// respondErrorOnce 实现 pendingRequestContext：用户未 Response 时补发错误响应，
+// 保证 processingRequestCount 归零。
+func (a *envelopeContextRequestAsync) respondErrorOnce() {
+	if a.doSendRsp {
+		return
+	}
+	a.Response(nil, NewVAError(ErrorCodeHandlerPanic))
+}
+
+type envelopeContextRequest struct {
 	*envelopeContextBase
 	requestId CallbackId
 	doSendRsp bool
 }
 
-func (a *envelopeContextRequst) Response(msg interface{}, err VAError) {
+func (a *envelopeContextRequest) Response(msg interface{}, err VAError) {
 	if a.fromActorRef == nil {
-		a.LogError("MsgContext.SendRsp called without a valid fromActorRef, this is not allowed")
+		a.LogError("EnvelopeContext.Response called without a valid fromActorRef, this is not allowed")
+		// 同上：无投递目标也必须归还计数，避免 actor 永不回收
+		a.processingRequestCount--
 		return
 	}
 	if a.doSendRsp {
-		a.LogError("MsgContext.SendRsp called more than once, this is not allowed")
+		a.LogError("EnvelopeContext.Response called more than once, this is not allowed")
 		return
 	}
 	a.doSendRsp = true
@@ -214,18 +231,26 @@ func (a *envelopeContextRequst) Response(msg interface{}, err VAError) {
 		ToActorRef:   a.fromActorRef,
 		RequestId:    a.requestId,
 	})
-	a.processeingRequestCount--
+	a.processingRequestCount--
 }
 
-type envelopeContextOuterRequst struct {
+// respondErrorOnce 实现 pendingRequestContext。
+func (a *envelopeContextRequest) respondErrorOnce() {
+	if a.doSendRsp {
+		return
+	}
+	a.Response(nil, NewVAError(ErrorCodeHandlerPanic))
+}
+
+type envelopeContextOuterRequest struct {
 	*envelopeContextBase
 	doSendRsp bool
 	rspChan   chan *Response
 }
 
-func (a *envelopeContextOuterRequst) Response(msg interface{}, err VAError) {
+func (a *envelopeContextOuterRequest) Response(msg interface{}, err VAError) {
 	if a.doSendRsp {
-		a.LogError("MsgContext.SendRsp called more than once, this is not allowed")
+		a.LogError("EnvelopeContext.Response called more than once, this is not allowed")
 		return
 	}
 	a.doSendRsp = true
@@ -233,4 +258,13 @@ func (a *envelopeContextOuterRequst) Response(msg interface{}, err VAError) {
 		Message: msg,
 		Error:   err,
 	}
+}
+
+// respondErrorOnce 实现 pendingRequestContext。RspChan 容量为 1 且尚未写入过，
+// 非阻塞写入不会失败。
+func (a *envelopeContextOuterRequest) respondErrorOnce() {
+	if a.doSendRsp {
+		return
+	}
+	a.Response(nil, NewVAError(ErrorCodeHandlerPanic))
 }

@@ -1,5 +1,7 @@
 package vactor
 
+import "time"
+
 type Envelope interface {
 	GetToActorRef() ActorRef
 }
@@ -79,6 +81,8 @@ type EnvelopeOuterRequest struct {
 	ToActorRef ActorRef
 	Message    interface{}
 	RspChan    chan *Response
+	// Timeout 是调用方的等待时限；分布式扩展可将其转发给代理以设置兜底超时。
+	Timeout time.Duration
 }
 
 func (e *EnvelopeOuterRequest) GetToActorRef() ActorRef {

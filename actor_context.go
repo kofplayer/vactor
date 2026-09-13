@@ -1,9 +1,14 @@
 package vactor
 
 import (
-	"reflect"
+	"sync/atomic"
 	"time"
 )
+
+// actorInstanceSeq 为每个 actorContext 生成进程内唯一递增实例 ID，
+// 用作异步请求响应的关联标识（CallbackAddress）。
+// 不再使用 context 指针地址：地址复用会让旧响应错配到新实例（ABA）。
+var actorInstanceSeq atomic.Uint64
 
 type actorContextCache struct {
 	watcherss      map[WatchType]map[ActorRefImpl]bool
@@ -24,17 +29,17 @@ func newActorContext(group *actorGroup, actorRef ActorRef, mailbox *Queue[Envelo
 		}
 	}
 	return &actorContext{
-		system:                     group.system,
-		group:                      group,
-		actorRef:                   actorRef,
-		mailbox:                    mailbox,
-		cache:                      cache,
-		waittingAsyncCallbackInfos: make(map[CallbackId]*callbackInfo),
-		onMessage:                  creator(),
-		callbackIdBase:             0,
-		syncRspChan:                make(chan *EnvelopeResponse, 1),
-		stopInterval:               group.system.defaultStopInterval,
-		onTickMsg:                  &MsgOnTick{},
+		system:                    group.system,
+		group:                     group,
+		actorRef:                  actorRef,
+		mailbox:                   mailbox,
+		cache:                     cache,
+		waitingAsyncCallbackInfos: make(map[CallbackId]*callbackInfo),
+		onMessage:                 creator(),
+		instanceId:                actorInstanceSeq.Add(1),
+		syncRspChan:               make(chan *EnvelopeResponse, 1),
+		stopInterval:              group.system.defaultStopInterval,
+		onTickMsg:                 &MsgOnTick{},
 	}
 }
 
@@ -45,22 +50,30 @@ type callbackInfo struct {
 }
 
 type actorContext struct {
-	system                     *system
-	group                      *actorGroup
-	actorRef                   ActorRef
-	mailbox                    *Queue[Envelope]
-	onMessage                  func(EnvelopeContext)
-	lastestMsgTime             time.Time
-	waittingAsyncCallbackInfos map[CallbackId]*callbackInfo
-	cache                      *actorContextCache
-	callbackIdBase             CallbackId
-	requestIdBase              CallbackId
-	waitingSyncRequestId       CallbackId
-	syncRspChan                chan *EnvelopeResponse
-	stopInterval               time.Duration
-	onTickMsg                  *MsgOnTick
-	processeingRequestCount    int32
-	isInvalid                  bool
+	system                    *system
+	group                     *actorGroup
+	actorRef                  ActorRef
+	mailbox                   *Queue[Envelope]
+	onMessage                 func(EnvelopeContext)
+	latestMsgTime             time.Time
+	waitingAsyncCallbackInfos map[CallbackId]*callbackInfo
+	cache                     *actorContextCache
+	callbackIdBase            CallbackId
+	requestIdBase             CallbackId
+	instanceId                uint64
+	waitingSyncRequestId      CallbackId
+	syncRspChan               chan *EnvelopeResponse
+	stopInterval              time.Duration
+	onTickMsg                 *MsgOnTick
+	processingRequestCount    int32
+	isInvalid                 bool
+}
+
+// pendingRequestContext 由 Request 类消息上下文实现：
+// 在用户 panic 且未调用 Response 时，框架代为回错，保证
+// processingRequestCount 归零、请求方不会悬挂到超时。
+type pendingRequestContext interface {
+	respondErrorOnce()
 }
 
 func (a *actorContext) GetActorRef() ActorRef {
@@ -75,13 +88,9 @@ func (a *actorContext) Send(actorRef ActorRef, msg interface{}) {
 	})
 }
 
-func getObjectAddr(f interface{}) uint64 {
-	return uint64(reflect.ValueOf(f).Pointer())
-}
-
 func (a *actorContext) RequestAsync(actorRef ActorRef, msg interface{}, timeout time.Duration, callback func(interface{}, VAError)) {
 	a.callbackIdBase++
-	a.waittingAsyncCallbackInfos[a.callbackIdBase] = &callbackInfo{
+	a.waitingAsyncCallbackInfos[a.callbackIdBase] = &callbackInfo{
 		callback: callback,
 		outtime:  time.Now().Add(timeout),
 		timeout:  timeout,
@@ -91,9 +100,11 @@ func (a *actorContext) RequestAsync(actorRef ActorRef, msg interface{}, timeout 
 		ToActorRef:      actorRef,
 		Message:         msg,
 		CallbackId:      a.callbackIdBase,
-		CallbackAddress: getObjectAddr(a),
+		CallbackAddress: a.instanceId,
 	})
 	if err != nil {
+		// 发送失败：立即删除回调登记并同步回调错误，避免条目残留导致 actor 无法回收
+		delete(a.waitingAsyncCallbackInfos, a.callbackIdBase)
 		callback(nil, err)
 	}
 }
@@ -115,7 +126,8 @@ func (a *actorContext) Request(actorRef ActorRef, msg interface{}, timeout time.
 	}
 
 	if timeout > 0 {
-		deadline := time.After(timeout)
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
 		for {
 			select {
 			case r := <-a.syncRspChan:
@@ -124,7 +136,7 @@ func (a *actorContext) Request(actorRef ActorRef, msg interface{}, timeout time.
 					return r.Message, r.Error
 				}
 				a.system.LogWarn("actor %v drop stale sync response, requestId %v not match waiting %v", a.actorRef, r.RequestId, a.waitingSyncRequestId)
-			case <-deadline:
+			case <-timer.C:
 				a.waitingSyncRequestId = 0
 				return nil, NewVAError(ErrorCodeTimeout)
 			}
@@ -240,7 +252,6 @@ func (a *actorContext) notify(watchType WatchType, message interface{}, notifyTy
 		}
 		var queues []*Queue[interface{}]
 		for queue := range outerWatchers {
-
 			if !queue.Enqueue(msg) {
 				queues = append(queues, queue)
 			}
@@ -281,7 +292,7 @@ func (a *actorContext) BatchSend(actorRefs []ActorRef, messages []interface{}) V
 }
 
 func (a *actorContext) SetStopInterval(d time.Duration) {
-	a.lastestMsgTime = time.Now()
+	a.latestMsgTime = time.Now()
 	a.stopInterval = d
 }
 
@@ -302,8 +313,8 @@ func (a *actorContext) LocalRouter(envelope Envelope) {
 	a.system.LocalRouter(envelope)
 }
 
-func (a *actorContext) waittingAsyncCallback() bool {
-	return len(a.waittingAsyncCallbackInfos) > 0
+func (a *actorContext) waitingAsyncCallback() bool {
+	return len(a.waitingAsyncCallbackInfos) > 0
 }
 
 func (a *actorContext) getNeedSaveCache() *actorContextCache {
@@ -314,13 +325,16 @@ func (a *actorContext) getNeedSaveCache() *actorContextCache {
 }
 
 func (a *actorContext) processMessage(ctx EnvelopeContext) {
+	if ctx == nil {
+		return
+	}
 	if a.onMessage == nil || a.isInvalid {
 		switch ec := ctx.(type) {
-		case *envelopeContextRequstAsync:
+		case *envelopeContextRequestAsync:
 			ec.Response(nil, NewVAError(ErrorCodeInvalidActor))
-		case *envelopeContextRequst:
+		case *envelopeContextRequest:
 			ec.Response(nil, NewVAError(ErrorCodeInvalidActor))
-		case *envelopeContextOuterRequst:
+		case *envelopeContextOuterRequest:
 			ec.Response(nil, NewVAError(ErrorCodeInvalidActor))
 		}
 		return
@@ -328,6 +342,10 @@ func (a *actorContext) processMessage(ctx EnvelopeContext) {
 	defer func() {
 		if r := recover(); r != nil {
 			a.system.LogError("actor %v processMessage panic: %v", a.actorRef, r)
+			// 用户 panic 且未 Response：代为回错，避免请求方悬挂、actor 泄漏
+			if pr, ok := ctx.(pendingRequestContext); ok {
+				pr.respondErrorOnce()
+			}
 		}
 	}()
 	a.onMessage(ctx)
@@ -342,14 +360,12 @@ func (a *actorContext) start() {
 				actorContext: a,
 				message:      &MsgOnStop{},
 			})
-			// a.system.LogDebug("actor %#v stop", a.actorRef)
 			a.group.mailbox.Enqueue(&envelopeStopedReport{
 				fromActorRef: a.actorRef,
 			})
 			a.system.wg.Done()
 		}()
-		a.lastestMsgTime = time.Now()
-		// a.system.LogDebug("actor %#v start", a.actorRef)
+		a.latestMsgTime = time.Now()
 		a.processMessage(&envelopeContextBase{
 			actorContext: a,
 			message:      &MsgOnStart{},
@@ -359,144 +375,170 @@ func (a *actorContext) start() {
 			if !ok {
 				return
 			}
-			latestIndex := len(msgs) - 1
-			for n, msg := range msgs {
-				msgs[n] = nil
-				isTick := false
-				switch t := msg.(type) {
-				case *EnvelopeWatch:
-					if t.IsWatch {
-						a.addWatcher(t.FromActorRef, t.WatchType)
-					} else {
-						a.removeWatcher(t.FromActorRef, t.WatchType)
-					}
-					continue
-				case *EnvelopeOuterWatch:
-					if t.IsWatch {
-						a.addOuterWatcher(t.Queue, t.WatchType)
-					} else {
-						a.removeOuterWatcher(t.Queue, t.WatchType)
-					}
-					continue
-				}
-				var c EnvelopeContext
-				switch t := msg.(type) {
-				case *EnvelopeSend:
-					c = &envelopeContextSend{
-						envelopeContextBase: &envelopeContextBase{
-							actorContext: a,
-							message:      t.Message,
-							fromActorRef: t.FromActorRef,
-						},
-					}
-				case *EnvelopeRequestAsync:
-					c = &envelopeContextRequstAsync{
-						envelopeContextBase: &envelopeContextBase{
-							actorContext: a,
-							message:      t.Message,
-							fromActorRef: t.FromActorRef,
-						},
-						callbackId:      t.CallbackId,
-						callbackAddress: t.CallbackAddress,
-					}
-					a.processeingRequestCount++
-				case *EnvelopeResponseAsync:
-					a.lastestMsgTime = time.Now()
-					if callbackInfo, ok := a.waittingAsyncCallbackInfos[t.CallbackId]; ok {
-						if getObjectAddr(a) == t.CallbackAddress {
-							callbackInfo.callback(t.Response.Message, t.Response.Error)
-							delete(a.waittingAsyncCallbackInfos, t.CallbackId)
-						} else {
-							a.system.LogWarn("%v receive rsp with unknown callbackAddress: %v", a.actorRef, t.CallbackAddress)
-						}
-					} else {
-						a.system.LogWarn("%v receive rsp with unknown callbackId: %v", a.actorRef, t.CallbackId)
-					}
-					continue
-				case *EnvelopeRequest:
-					c = &envelopeContextRequst{
-						envelopeContextBase: &envelopeContextBase{
-							actorContext: a,
-							message:      t.Message,
-							fromActorRef: t.FromActorRef,
-						},
-						requestId: t.RequestId,
-					}
-					a.processeingRequestCount++
-				case *EnvelopeOuterRequest:
-					c = &envelopeContextOuterRequst{
-						envelopeContextBase: &envelopeContextBase{
-							actorContext: a,
-							message:      t.Message,
-						},
-						rspChan: t.RspChan,
-					}
-				case *envelopeTick:
-					waittingAsyncCallback := a.waittingAsyncCallback()
-					if n >= latestIndex && a.processeingRequestCount <= 0 && !waittingAsyncCallback && a.stopInterval > 0 && a.lastestMsgTime.Add(a.stopInterval).Before(time.Now()) {
-						return
-					}
-					if waittingAsyncCallback {
-						tm := make(map[CallbackId]bool)
-						for id, info := range a.waittingAsyncCallbackInfos {
-							if info.timeout > 0 && info.outtime.Before(time.Now()) {
-								info.callback(nil, NewVAError(ErrorCodeTimeout))
-								tm[id] = true
-							}
-						}
-						for id := range tm {
-							delete(a.waittingAsyncCallbackInfos, id)
-						}
-					}
-					c = &envelopeContextBase{
-						actorContext: a,
-						message:      a.onTickMsg,
-					}
-					isTick = true
-				case *EnvelopeBatchSend:
-					ctx := &envelopeContextSend{
-						envelopeContextBase: &envelopeContextBase{
-							actorContext: a,
-							fromActorRef: t.FromActorRef,
-						},
-					}
-					for _, msg := range t.Messages {
-						ctx.message = msg
-						a.processMessage(ctx)
-					}
-					a.lastestMsgTime = time.Now()
-					continue
-				case *EnvelopeNotify:
-					switch t.NotifyType {
-					case NotifyTypeWatch:
-						c = &envelopeContextNotify{
-							envelopeContextBase: &envelopeContextBase{
-								actorContext: a,
-								fromActorRef: t.FromActorRef,
-								message:      t.Message,
-							},
-						}
-					case NotifyTypeEvent:
-						c = &envelopeContextNotify{
-							envelopeContextBase: &envelopeContextBase{
-								actorContext: a,
-								fromActorRef: t.FromActorRef,
-								message: &MsgOnEventMsg{
-									EventGroup: EventGroup(t.Message.ActorRef.GetActorId()),
-									EventId:    EventId(t.Message.WatchType),
-									Message:    t.Message.Message,
-								},
-							},
-						}
-					}
-				case *EnvelopeFireNotify:
-					a.notify(t.WatchType, t.Message, t.NotifyType)
-				}
-				if !isTick {
-					a.lastestMsgTime = time.Now()
-				}
-				a.processMessage(c)
+			if a.processBatch(msgs) {
+				return
 			}
 		}
 	}()
+}
+
+// processBatch 处理一批信封；返回 true 表示 actor 应退出（闲置回收）。
+// 整批 recover：单个异常信封最多损失本批剩余消息，不会拖垮 actor goroutine。
+func (a *actorContext) processBatch(msgs []Envelope) (stop bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			a.system.LogError("actor %v process batch panic: %v", a.actorRef, r)
+		}
+	}()
+	latestIndex := len(msgs) - 1
+	for n, msg := range msgs {
+		msgs[n] = nil
+		isTick := false
+		switch t := msg.(type) {
+		case *EnvelopeWatch:
+			if t.IsWatch {
+				a.addWatcher(t.FromActorRef, t.WatchType)
+			} else {
+				a.removeWatcher(t.FromActorRef, t.WatchType)
+			}
+			continue
+		case *EnvelopeOuterWatch:
+			if t.IsWatch {
+				a.addOuterWatcher(t.Queue, t.WatchType)
+			} else {
+				a.removeOuterWatcher(t.Queue, t.WatchType)
+			}
+			continue
+		}
+		var c EnvelopeContext
+		switch t := msg.(type) {
+		case *EnvelopeSend:
+			c = &envelopeContextSend{
+				envelopeContextBase: &envelopeContextBase{
+					actorContext: a,
+					message:      t.Message,
+					fromActorRef: t.FromActorRef,
+				},
+			}
+		case *EnvelopeRequestAsync:
+			c = &envelopeContextRequestAsync{
+				envelopeContextBase: &envelopeContextBase{
+					actorContext: a,
+					message:      t.Message,
+					fromActorRef: t.FromActorRef,
+				},
+				callbackId:      t.CallbackId,
+				callbackAddress: t.CallbackAddress,
+			}
+			a.processingRequestCount++
+		case *EnvelopeResponseAsync:
+			a.latestMsgTime = time.Now()
+			if callbackInfo, ok := a.waitingAsyncCallbackInfos[t.CallbackId]; ok {
+				if a.instanceId == t.CallbackAddress {
+					a.invokeCallbackSafely(callbackInfo.callback, t.Response.Message, t.Response.Error)
+					delete(a.waitingAsyncCallbackInfos, t.CallbackId)
+				} else {
+					a.system.LogWarn("%v receive rsp with unknown callbackAddress: %v", a.actorRef, t.CallbackAddress)
+				}
+			} else {
+				a.system.LogWarn("%v receive rsp with unknown callbackId: %v", a.actorRef, t.CallbackId)
+			}
+			continue
+		case *EnvelopeRequest:
+			c = &envelopeContextRequest{
+				envelopeContextBase: &envelopeContextBase{
+					actorContext: a,
+					message:      t.Message,
+					fromActorRef: t.FromActorRef,
+				},
+				requestId: t.RequestId,
+			}
+			a.processingRequestCount++
+		case *EnvelopeOuterRequest:
+			c = &envelopeContextOuterRequest{
+				envelopeContextBase: &envelopeContextBase{
+					actorContext: a,
+					message:      t.Message,
+				},
+				rspChan: t.RspChan,
+			}
+		case *envelopeTick:
+			waitingAsyncCallback := a.waitingAsyncCallback()
+			if n >= latestIndex && a.processingRequestCount <= 0 && !waitingAsyncCallback && a.stopInterval > 0 && a.latestMsgTime.Add(a.stopInterval).Before(time.Now()) {
+				return true
+			}
+			if waitingAsyncCallback {
+				tm := make(map[CallbackId]bool)
+				for id, info := range a.waitingAsyncCallbackInfos {
+					if info.timeout > 0 && info.outtime.Before(time.Now()) {
+						a.invokeCallbackSafely(info.callback, nil, NewVAError(ErrorCodeTimeout))
+						tm[id] = true
+					}
+				}
+				for id := range tm {
+					delete(a.waitingAsyncCallbackInfos, id)
+				}
+			}
+			c = &envelopeContextBase{
+				actorContext: a,
+				message:      a.onTickMsg,
+			}
+			isTick = true
+		case *EnvelopeBatchSend:
+			ctx := &envelopeContextSend{
+				envelopeContextBase: &envelopeContextBase{
+					actorContext: a,
+					fromActorRef: t.FromActorRef,
+				},
+			}
+			for _, msg := range t.Messages {
+				ctx.message = msg
+				a.processMessage(ctx)
+			}
+			a.latestMsgTime = time.Now()
+			continue
+		case *EnvelopeNotify:
+			switch t.NotifyType {
+			case NotifyTypeWatch:
+				c = &envelopeContextNotify{
+					envelopeContextBase: &envelopeContextBase{
+						actorContext: a,
+						fromActorRef: t.FromActorRef,
+						message:      t.Message,
+					},
+				}
+			case NotifyTypeEvent:
+				c = &envelopeContextNotify{
+					envelopeContextBase: &envelopeContextBase{
+						actorContext: a,
+						fromActorRef: t.FromActorRef,
+						message: &MsgOnEventMsg{
+							EventGroup: EventGroup(t.Message.ActorRef.GetActorId()),
+							EventId:    EventId(t.Message.WatchType),
+							Message:    t.Message.Message,
+						},
+					},
+				}
+			}
+		case *EnvelopeFireNotify:
+			a.notify(t.WatchType, t.Message, t.NotifyType)
+			a.latestMsgTime = time.Now()
+			continue
+		}
+		if !isTick {
+			a.latestMsgTime = time.Now()
+		}
+		a.processMessage(c)
+	}
+	return false
+}
+
+// invokeCallbackSafely 执行用户异步回调；回调 panic 只记日志，不拖垮 actor goroutine。
+func (a *actorContext) invokeCallbackSafely(callback func(interface{}, VAError), msg interface{}, err VAError) {
+	defer func() {
+		if r := recover(); r != nil {
+			a.system.LogError("actor %v request callback panic: %v", a.actorRef, r)
+		}
+	}()
+	callback(msg, err)
 }

@@ -24,18 +24,7 @@ func NewRingBuffer[T any](size int) *RingBuffer[T] {
 
 func (rb *RingBuffer[T]) Push(value T) {
 	if rb.IsFull() {
-		newSize := rb.size * 2
-		newBuffer := make([]T, newSize)
-		if rb.head < rb.tail {
-			copy(newBuffer, rb.buffer[rb.head:rb.tail])
-		} else {
-			n := copy(newBuffer, rb.buffer[rb.head:rb.size])
-			copy(newBuffer[n:], rb.buffer[0:rb.tail])
-		}
-		rb.buffer = newBuffer
-		rb.size = newSize
-		rb.head = 0
-		rb.tail = rb.count
+		rb.grow(1)
 	}
 
 	rb.buffer[rb.tail] = value
@@ -48,25 +37,36 @@ func (rb *RingBuffer[T]) PushBatch(values []T) {
 	if n == 0 {
 		return
 	}
-	for rb.size-rb.count < n {
-		newSize := rb.size * 2
-		newBuffer := make([]T, newSize)
-		if rb.head < rb.tail {
-			copy(newBuffer, rb.buffer[rb.head:rb.tail])
-		} else {
-			c := copy(newBuffer, rb.buffer[rb.head:rb.size])
-			copy(newBuffer[c:], rb.buffer[0:rb.tail])
-		}
-		rb.buffer = newBuffer
-		rb.size = newSize
-		rb.head = 0
-		rb.tail = rb.count
+	if rb.size-rb.count < n {
+		rb.grow(n)
 	}
 	for _, value := range values {
 		rb.buffer[rb.tail] = value
 		rb.tail = (rb.tail + 1) % rb.size
 		rb.count++
 	}
+}
+
+// grow 扩容到至少还能容纳 minFree 个元素，并把环形数据搬迁到新缓冲的头部。
+// 仅在剩余容量不足时调用。搬迁分两种情况：
+//   - head < tail：数据在 [head, tail) 上连续；
+//   - 其余（含满载时 head == tail）：数据被回绕切成 [head, size) + [0, tail) 两段。
+func (rb *RingBuffer[T]) grow(minFree int) {
+	newSize := rb.size
+	for newSize-rb.count < minFree {
+		newSize *= 2
+	}
+	newBuffer := make([]T, newSize)
+	if rb.head < rb.tail {
+		copy(newBuffer, rb.buffer[rb.head:rb.tail])
+	} else {
+		n := copy(newBuffer, rb.buffer[rb.head:rb.size])
+		copy(newBuffer[n:], rb.buffer[0:rb.tail])
+	}
+	rb.buffer = newBuffer
+	rb.size = newSize
+	rb.head = 0
+	rb.tail = rb.count
 }
 
 func (rb *RingBuffer[T]) Pop() (T, bool) {

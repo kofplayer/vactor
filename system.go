@@ -153,6 +153,7 @@ type system struct {
 	ticker               *time.Ticker
 	stopChan             chan struct{}
 	stopped              atomic.Bool
+	started              atomic.Bool
 	defaultStopInterval  time.Duration
 	tickInterval         time.Duration
 	router               Router
@@ -162,27 +163,41 @@ type system struct {
 	createActorRefExFunc CreateActorRefExFunc
 }
 
-func (s *system) RegisterActorType(actorType ActorType, actorCreator func() Actor) {
-	if s.IsRunning() {
+// startedGuard 拦截"仅允许启动前"的配置操作：启动前与启动后（含 Stop 后）均拒绝。
+func (s *system) startedGuard() bool {
+	if s.started.Load() {
 		s.LogError("cannot change config after system started")
+		return true
+	}
+	return false
+}
+
+func (s *system) RegisterActorType(actorType ActorType, actorCreator func() Actor) {
+	if s.startedGuard() {
 		return
 	}
 	if actorType < ActorTypeStart {
 		s.LogError("actorType %v is invalid, must large than %v", actorType, ActorTypeStart)
 		return
 	}
+	if _, exists := s.actorCreators[actorType]; exists {
+		s.LogWarn("actorType %v re-registered, new creator overrides the old one", actorType)
+	}
 	s.actorCreators[actorType] = actorCreator
 }
 
 func (s *system) SetRouter(router Router) {
-	if s.IsRunning() {
-		s.LogError("cannot change config after system started")
+	if s.startedGuard() {
 		return
 	}
 	s.router = router
 }
 
 func (s *system) Start() {
+	if !s.started.CompareAndSwap(false, true) {
+		s.LogError("system already started, ignore duplicate Start")
+		return
+	}
 	s.groupCount = s.config.GroupCount
 	if s.groupCount == 0 {
 		s.groupCount = uint16(runtime.NumCPU())
@@ -258,10 +273,20 @@ func (s *system) BatchSend(actorRefs []ActorRef, messages []interface{}) VAError
 }
 
 func (s *system) sendEnvelope(msg Envelope) VAError {
+	if s.router == nil {
+		// Start 之前（router 未注入）：消息无法投递，直接报错而不是 panic
+		return NewVAError(ErrorCodeSystemNotStarted)
+	}
 	return s.router(msg)
 }
 
+// LocalRouter 本地投递。mailbox 已关闭（系统停机中或已停止）时返回错误：
+// 静默丢弃会让调用方误以为消息已送达。
 func (s *system) LocalRouter(envelope Envelope) VAError {
+	if len(s.actorGroups) == 0 {
+		return NewVAError(ErrorCodeSystemNotStarted)
+	}
+	dropped := false
 	switch e := envelope.(type) {
 	case *EnvelopeBatchSend:
 		groups := make(map[*actorGroup][]ActorRef)
@@ -270,11 +295,13 @@ func (s *system) LocalRouter(envelope Envelope) VAError {
 			groups[group] = append(groups[group], toActorRef)
 		}
 		for group, actorRefs := range groups {
-			group.mailbox.Enqueue(&EnvelopeBatchSend{
+			if !group.mailbox.Enqueue(&EnvelopeBatchSend{
 				FromActorRef: e.FromActorRef,
 				ToActorRefs:  actorRefs,
 				Messages:     e.Messages,
-			})
+			}) {
+				dropped = true
+			}
 		}
 	case *EnvelopeNotify:
 		groups := make(map[*actorGroup][]ActorRef)
@@ -283,16 +310,23 @@ func (s *system) LocalRouter(envelope Envelope) VAError {
 			groups[group] = append(groups[group], toActorRef)
 		}
 		for group, actorRefs := range groups {
-			group.mailbox.Enqueue(&EnvelopeNotify{
+			if !group.mailbox.Enqueue(&EnvelopeNotify{
 				FromActorRef: e.FromActorRef,
 				ToActorRefs:  actorRefs,
 				NotifyType:   e.NotifyType,
 				Message:      e.Message,
-			})
+			}) {
+				dropped = true
+			}
 		}
 	default:
 		group := s.getActorGroup(envelope.GetToActorRef())
-		group.mailbox.Enqueue(envelope)
+		if !group.mailbox.Enqueue(envelope) {
+			dropped = true
+		}
+	}
+	if dropped {
+		return NewVAError(ErrorCodeSystemNotStarted)
 	}
 	return nil
 }
@@ -307,16 +341,22 @@ func (s *system) Send(actorRef ActorRef, msg interface{}) {
 
 func (s *system) Request(actorRef ActorRef, msg interface{}, timeout time.Duration) (interface{}, VAError) {
 	c := make(chan *Response, 1)
-	s.sendEnvelope(&EnvelopeOuterRequest{
+	err := s.sendEnvelope(&EnvelopeOuterRequest{
 		ToActorRef: actorRef,
 		Message:    msg,
 		RspChan:    c,
+		Timeout:    timeout,
 	})
+	if err != nil {
+		return nil, err
+	}
 	if timeout > 0 {
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
 		select {
 		case r := <-c:
 			return r.Message, r.Error
-		case <-time.After(timeout):
+		case <-timer.C:
 			return nil, NewVAError(ErrorCodeTimeout)
 		}
 	} else {
@@ -376,8 +416,7 @@ func (s *system) CreateActorRefEx(systemId SystemId, actorType ActorType, actorI
 }
 
 func (s *system) SetCreateActorRefExFunc(createActorRefExFunc CreateActorRefExFunc) {
-	if s.IsRunning() {
-		s.LogError("cannot change config after system started")
+	if s.startedGuard() {
 		return
 	}
 	s.createActorRefExFunc = createActorRefExFunc
