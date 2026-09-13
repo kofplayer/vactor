@@ -147,13 +147,13 @@ func (m *actorGroup) processEnvelope(toActorRef ActorRef, envelopes Envelope) {
 		m.system.LogWarn("actor %v mailbox depth %d exceeds high water mark %d",
 			toActorRef, depth, m.system.mailboxHighWaterMark)
 	}
-	actorCtx, ok := m.actorContexts[*actorRefImpl]
-	if !ok {
+	// 这里只关心 actor 是否已存在：已存在则直接投递，不存在才新建 context。
+	if _, exists := m.actorContexts[*actorRefImpl]; !exists {
 		cache, ok := m.actorCaches[*actorRefImpl]
 		if ok {
 			delete(m.actorCaches, *actorRefImpl)
 		}
-		actorCtx = newActorContext(m, toActorRef, actorMailbox, cache)
+		actorCtx := newActorContext(m, toActorRef, actorMailbox, cache)
 		if actorCtx == nil {
 			delete(m.actorMailboxes, *actorRefImpl)
 			return

@@ -129,35 +129,35 @@ type envelopeContextBase struct {
 }
 
 func (a *envelopeContextBase) LogDebug(format string, args ...interface{}) {
-	a.actorContext.system.logFunc(DebugLevel, format, args...)
+	a.system.logFunc(DebugLevel, format, args...)
 }
 
 func (a *envelopeContextBase) LogInfo(format string, args ...interface{}) {
-	a.actorContext.system.logFunc(InfoLevel, format, args...)
+	a.system.logFunc(InfoLevel, format, args...)
 }
 
 func (a *envelopeContextBase) LogWarn(format string, args ...interface{}) {
-	a.actorContext.system.logFunc(WarnLevel, format, args...)
+	a.system.logFunc(WarnLevel, format, args...)
 }
 
 func (a *envelopeContextBase) LogError(format string, args ...interface{}) {
-	a.actorContext.system.logFunc(ErrorLevel, format, args...)
+	a.system.logFunc(ErrorLevel, format, args...)
 }
 
 func (a *envelopeContextBase) LogFatal(format string, args ...interface{}) {
-	a.actorContext.system.logFunc(FatalLevel, format, args...)
+	a.system.logFunc(FatalLevel, format, args...)
 }
 
 // LogPanic 与 System.LogPanic 语义一致：记录日志后 panic。
 // panic 会被 actor/group 的批量 recover 捕获，只损失当前消息，不拖垮系统。
 func (a *envelopeContextBase) LogPanic(format string, args ...interface{}) {
-	a.actorContext.system.logFunc(PanicLevel, format, args...)
+	a.system.logFunc(PanicLevel, format, args...)
 	panic(fmt.Sprintf(format, args...))
 }
 
 // SetTickEnabled 实现 EnvelopeContext：关闭后仅在框架需要时投递 tick。
 func (a *envelopeContextBase) SetTickEnabled(enabled bool) {
-	a.actorContext.setTickEnabled(enabled)
+	a.setTickEnabled(enabled)
 }
 
 func (a *envelopeContextBase) Response(msg interface{}, err VAError) {
@@ -199,7 +199,7 @@ func (a *envelopeContextRequestAsync) Response(msg interface{}, err VAError) {
 		return
 	}
 	a.doSendRsp = true
-	a.system.sendEnvelope(&EnvelopeResponseAsync{
+	_ = a.system.sendEnvelope(&EnvelopeResponseAsync{
 		Response: &Response{
 			Message: msg,
 			Error:   err,
@@ -239,7 +239,7 @@ func (a *envelopeContextRequest) Response(msg interface{}, err VAError) {
 		return
 	}
 	a.doSendRsp = true
-	a.system.sendEnvelope(&EnvelopeResponse{
+	_ = a.system.sendEnvelope(&EnvelopeResponse{
 		Response: &Response{
 			Message: msg,
 			Error:   err,

@@ -362,7 +362,7 @@ func (s *system) LocalRouter(envelope Envelope) VAError {
 }
 
 func (s *system) Send(actorRef ActorRef, msg interface{}) {
-	s.sendEnvelope(&EnvelopeSend{
+	_ = s.sendEnvelope(&EnvelopeSend{
 		FromActorRef: nil,
 		ToActorRef:   actorRef,
 		Message:      msg,
@@ -399,7 +399,7 @@ func (s *system) Watch(actorRef ActorRef, watchType WatchType, queue *Queue[inte
 	if queue == nil {
 		return
 	}
-	s.sendEnvelope(&EnvelopeOuterWatch{
+	_ = s.sendEnvelope(&EnvelopeOuterWatch{
 		ToActorRef: actorRef,
 		WatchType:  watchType,
 		IsWatch:    true,
@@ -411,7 +411,7 @@ func (s *system) Unwatch(actorRef ActorRef, watchType WatchType, queue *Queue[in
 	if queue == nil {
 		return
 	}
-	s.sendEnvelope(&EnvelopeOuterWatch{
+	_ = s.sendEnvelope(&EnvelopeOuterWatch{
 		ToActorRef: actorRef,
 		WatchType:  watchType,
 		IsWatch:    false,
@@ -428,7 +428,7 @@ func (s *system) UnlistenEvent(eventGroup EventGroup, eventId EventId, queue *Qu
 }
 
 func (s *system) FireEvent(eventGroup EventGroup, eventId EventId, message interface{}) {
-	s.sendEnvelope(&EnvelopeFireNotify{
+	_ = s.sendEnvelope(&EnvelopeFireNotify{
 		FromActorRef: nil,
 		ToActorRef:   s.CreateActorRef(EventHubActorType, ActorId(eventGroup)),
 		NotifyType:   NotifyTypeEvent,

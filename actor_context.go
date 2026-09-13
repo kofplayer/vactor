@@ -121,7 +121,7 @@ func (a *actorContext) GetActorRef() ActorRef {
 }
 
 func (a *actorContext) Send(actorRef ActorRef, msg interface{}) {
-	a.system.sendEnvelope(&EnvelopeSend{
+	_ = a.system.sendEnvelope(&EnvelopeSend{
 		FromActorRef: a.actorRef,
 		ToActorRef:   actorRef,
 		Message:      msg,
@@ -195,7 +195,7 @@ func (a *actorContext) Request(actorRef ActorRef, msg interface{}, timeout time.
 }
 
 func (a *actorContext) Watch(actorRef ActorRef, watchType WatchType) {
-	a.system.sendEnvelope(&EnvelopeWatch{
+	_ = a.system.sendEnvelope(&EnvelopeWatch{
 		FromActorRef: a.actorRef,
 		ToActorRef:   actorRef,
 		WatchType:    watchType,
@@ -204,7 +204,7 @@ func (a *actorContext) Watch(actorRef ActorRef, watchType WatchType) {
 }
 
 func (a *actorContext) Unwatch(actorRef ActorRef, watchType WatchType) {
-	a.system.sendEnvelope(&EnvelopeWatch{
+	_ = a.system.sendEnvelope(&EnvelopeWatch{
 		FromActorRef: a.actorRef,
 		ToActorRef:   actorRef,
 		WatchType:    watchType,
@@ -273,7 +273,7 @@ func (a *actorContext) notify(watchType WatchType, message interface{}, notifyTy
 			toActorRefs[n] = &key
 			n++
 		}
-		a.system.sendEnvelope(&EnvelopeNotify{
+		_ = a.system.sendEnvelope(&EnvelopeNotify{
 			FromActorRef: a.actorRef,
 			ToActorRefs:  toActorRefs,
 			NotifyType:   notifyType,
@@ -329,7 +329,7 @@ func (a *actorContext) UnlistenEvent(eventGroup EventGroup, eventId EventId) {
 }
 
 func (a *actorContext) FireEvent(eventGroup EventGroup, eventId EventId, message interface{}) {
-	a.system.sendEnvelope(&EnvelopeFireNotify{
+	_ = a.system.sendEnvelope(&EnvelopeFireNotify{
 		FromActorRef: a.actorRef,
 		ToActorRef:   a.CreateActorRef(EventHubActorType, ActorId(eventGroup)),
 		NotifyType:   NotifyTypeEvent,
@@ -362,7 +362,7 @@ func (a *actorContext) CreateActorRefEx(systemId SystemId, actorType ActorType, 
 }
 
 func (a *actorContext) LocalRouter(envelope Envelope) {
-	a.system.LocalRouter(envelope)
+	_ = a.system.LocalRouter(envelope)
 }
 
 func (a *actorContext) waitingAsyncCallback() bool {
@@ -487,7 +487,7 @@ func (a *actorContext) processBatch(msgs []Envelope) (stop bool) {
 			a.touch(time.Now())
 			if callbackInfo, ok := a.waitingAsyncCallbackInfos[t.CallbackId]; ok {
 				if a.instanceId == t.CallbackAddress {
-					a.invokeCallbackSafely(callbackInfo.callback, t.Response.Message, t.Response.Error)
+					a.invokeCallbackSafely(callbackInfo.callback, t.Message, t.Error)
 					delete(a.waitingAsyncCallbackInfos, t.CallbackId)
 					a.pendingAsyncCallback.Add(-1)
 				} else {
@@ -567,7 +567,7 @@ func (a *actorContext) processBatch(msgs []Envelope) (stop bool) {
 						actorContext: a,
 						fromActorRef: t.FromActorRef,
 						message: &MsgOnEventMsg{
-							EventGroup: EventGroup(t.Message.ActorRef.GetActorId()),
+							EventGroup: EventGroup(t.Message.GetActorId()),
 							EventId:    EventId(t.Message.WatchType),
 							Message:    t.Message.Message,
 						},
