@@ -11,10 +11,14 @@
 | `SystemId` | 0 | 系统标识；单机模式保持 0 |
 | `GroupCount` | 0 → NumCPU | actor 分组数 |
 | `DefaultStopInterval` | 10min | actor 闲置自动回收时间；0 = 永不回收 |
-| `TickInterval` | 1s | tick 周期；≤0 关闭 tick（同时关闭闲置回收检查） |
+| `TickInterval` | 1s | tick 周期；**≤0 关闭 tick（见下方警告）** |
 | `MailboxHighWaterMark` | 0（不告警） | actor mailbox 深度达到该值记 Warn（只告警不丢弃） |
 | `MaxMailboxDepth` | 0（不限制） | actor mailbox 深度上限；达到上限的新消息被丢弃并记 Error（慢消费者背压） |
 | `LogFunc` | stdout 打印 | 自定义日志（仅 Start 后生效；Start 前的日志走默认 stdout 实现） |
+
+> **⚠️ `TickInterval <= 0` 的完整后果**：tick 循环是框架做周期维护的唯一时机，关闭后不只是「不做闲置回收检查」，还会连带停掉 **异步请求超时扫描**——`RequestAsync` 指定了 timeout 也**永远不会触发超时回调**（回调永久悬挂），同时 `processingRequestCount` 无法通过超时路径归零，actor **永不回收**。仅当你的 actor 全部不需要回收、也不使用带超时的异步请求时才可关闭；否则请保留默认 1s。
+>
+> 若确实想降低 tick 开销，正确做法不是关掉 tick，而是给不需要周期任务的 actor 调 `ctx.SetTickEnabled(false)`（框架仍会为有未完成异步回调、或满足回收条件的 actor 投递 tick）。
 
 ## System 接口（[system.go](../system.go)）
 
@@ -23,11 +27,11 @@
 | `RegisterActorType(type, creator)` | 注册 actor 类型；`type ≥ ActorTypeStart(10)`；仅 Start 前（重复注册记 Warn，新 creator 覆盖旧的） |
 | `Start()` / `Stop()` / `IsRunning()` | 启动（创建 group、ticker；双重 Start 被拒绝）/ 优雅停止（关 mailbox、等 WaitGroup；不可重启）/ 运行态。Start 前发送消息返回 `ErrorCodeSystemNotStarted` |
 | `Send(ref, msg)` | 单向消息，无返回 |
-| `Request(ref, msg, timeout) (interface{}, VAError)` | 系统外同步请求；`timeout ≤ 0` 表示无限等待 |
+| `Request(ref, msg, timeout) (interface{}, VAError)` | 系统外同步请求；`timeout ≤ 0` 表示无限等待——**会一直阻塞调用方 goroutine 直到目标响应**，目标不响应则永久悬挂，建议显式给时限 |
 | `Watch(ref, watchType, queue)` / `Unwatch(...)` | 系统外 watch，通知投递到 `Queue[interface{}]`（消息为 `*MsgOnWatchMsg`） |
 | `ListenEvent(group, id, queue)` / `UnlistenEvent` / `FireEvent(group, id, msg)` | 系统外事件订阅/触发；队列收到 `*MsgOnEventMsg` |
 | `BatchSend(refs, msgs) VAError` | 批量发送；所有 ref 收到全部 msgs 的逐条副本 |
-| `CreateActorRef(type, id)` / `CreateActorRefEx(systemId, type, id)` | 创建引用；前者 SystemId=0（自动计算） |
+| `CreateActorRef(type, id)` / `CreateActorRefEx(systemId, type, id)` | 创建引用；`CreateActorRef` 等价于 `CreateActorRefEx(0, ...)`。**vactor 单机版下 SystemId 恒为 0，只按 ActorId 算出 GroupSlot**；"按 ActorId 哈希选节点"是 dvactor 替换寻址函数后的行为 |
 | `SetRouter(router)` / `LocalRouter(envelope)` | 分布式扩展钩子：替换路由 / 本地默认路由（扩展机制见架构文档） |
 | `SetCreateActorRefExFunc(f)` | 分布式扩展钩子：替换寻址函数 |
 | `LogDebug/Info/Warn/Error/Fatal/Panic` | Logger；Panic 级会 panic |

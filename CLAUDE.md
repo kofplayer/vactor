@@ -30,6 +30,7 @@
 - panic 防护：actor 与 group 的信封处理整批 recover，用户 panic（含 `ctx.LogPanic`、异步回调 panic）只记日志；请求类消息 panic 且未 `Response` 时框架代为回错（语义见 [架构文档](docs/architecture.md)）。
 - `ctx.Response()` 仅对 Request 类消息有效，且**只能调用一次**；对 Send/Notify 调用会记错误日志。
 - `SystemId=0` 表示"未指定"，本地单机模式下所有 actor 都属于本系统。
+- **SystemId 越界（单机版）**：`System` 内部的 `systemId` 恒为 0。若用 `CreateActorRefEx(非0, ...)` 造出 SystemId≠0 的引用并投递，`group.processEnvelope` 会 `LogPanic`——panic 被 group 的整批 recover 捕获，**该批消息全部静默丢弃**（进程不崩，但消息丢失且只有一行日志）。除非像 dvactor 那样用 `SetCreateActorRefExFunc` 接管寻址，不要手工指定非 0 的 SystemId。
 - 分布式扩展点：`SetRouter`（替换路由）与 `SetCreateActorRefExFunc`（替换寻址），dvactor 即通过这两个钩子接入——见 [dvactor/CLAUDE.md](../dvactor/CLAUDE.md)。
 
 ## 示例（[examples/](examples/)）

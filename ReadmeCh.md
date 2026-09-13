@@ -1,3 +1,5 @@
+[English Documents](Readme.md)
+
 # vactor
 
 vactor 是一个高性能、轻量级的 虚拟actor 框架，不依赖任何第三方库。
@@ -72,10 +74,10 @@ func main() {
 
 - [examples/hello/main.go](examples/hello/main.go)：基础消息发送
 - [examples/send/main.go](examples/send/main.go)：Actor 内外消息发送
-- [examples/request/main.go](examples/request/main.go)：请求/响应模
+- [examples/request/main.go](examples/request/main.go)：请求/响应模式
 - [examples/event/main.go](examples/event/main.go)：事件监听与分发
 - [examples/watch/main.go](examples/watch/main.go)：watch/unwatch 机制
-- [examples/liftcycle/main.go](examples/lifecycle/main.go)：actor 生命周期
+- [examples/lifecycle/main.go](examples/lifecycle/main.go)：actor 生命周期
 
 ## License
 
