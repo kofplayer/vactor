@@ -272,7 +272,7 @@ func TestSyncRequestBlocksOnlyCaller(t *testing.T) {
 			return func(ctx vactor.EnvelopeContext) {
 				switch ctx.GetMessage().(type) {
 				case string:
-					ctx.Request(ctx.CreateActorRef(reqEchoType, "1"), "hi", 3*time.Second)
+					_, _ = ctx.Request(ctx.CreateActorRef(reqEchoType, "1"), "hi", 3*time.Second)
 					callerDone <- true
 				}
 			}
@@ -359,7 +359,7 @@ func TestLateResponseDoesNotReactivateStoppedActor(t *testing.T) {
 						starts <- struct{}{}
 					case string:
 						// 超时 50ms，echo 200ms 后才应答 -> 响应必定迟到
-						ctx.Request(ctx.CreateActorRef(reqEchoType, "1"), "late", 50*time.Millisecond)
+						_, _ = ctx.Request(ctx.CreateActorRef(reqEchoType, "1"), "late", 50*time.Millisecond)
 						// 主动把自己标记为立即回收
 						ctx.SetStopInterval(30 * time.Millisecond)
 					}

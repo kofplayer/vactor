@@ -44,8 +44,8 @@ func TestInnerWatchNotifyFields(t *testing.T) {
 	if m.WatchType != watchTestWT {
 		t.Fatalf("watchType = %v", m.WatchType)
 	}
-	if m.ActorRef.GetActorId() != "t" || m.ActorRef.GetActorType() != 101 {
-		t.Fatalf("ActorRef = %v/%v", m.ActorRef.GetActorType(), m.ActorRef.GetActorId())
+	if m.GetActorId() != "t" || m.GetActorType() != 101 {
+		t.Fatalf("ActorRef = %v/%v", m.GetActorType(), m.GetActorId())
 	}
 	if m.Message != "payload" {
 		t.Fatalf("message = %v", m.Message)
@@ -135,9 +135,10 @@ func TestWatchTypesIndependent(t *testing.T) {
 					ctx.Watch(ctx.CreateActorRef(101, "t"), 3)
 					ctx.Watch(ctx.CreateActorRef(101, "t"), 4)
 				case *vactor.MsgOnWatchMsg:
-					if m.WatchType == 3 {
+					switch m.WatchType {
+					case 3:
 						seen3 <- m
-					} else if m.WatchType == 4 {
+					case 4:
 						seen4 <- m
 					}
 				}
@@ -147,9 +148,10 @@ func TestWatchTypesIndependent(t *testing.T) {
 			return func(ctx vactor.EnvelopeContext) {
 				switch m := ctx.GetMessage().(type) {
 				case string:
-					if m == "fire3" {
+					switch m {
+					case "fire3":
 						ctx.Notify(3, "p3")
-					} else if m == "fire4" {
+					case "fire4":
 						ctx.Notify(4, "p4")
 					}
 				}
@@ -196,7 +198,7 @@ func TestOuterWatchQueue(t *testing.T) {
 
 	ts.Send(ts.CreateActorRef(101, "t"), "go")
 	m := testutil.WaitChan(t, seen, 3*time.Second, "outer watch notify")
-	if m.Message != "payload" || m.ActorRef.GetActorId() != "t" {
+	if m.Message != "payload" || m.GetActorId() != "t" {
 		t.Fatalf("outer notify fields wrong: %+v", m)
 	}
 

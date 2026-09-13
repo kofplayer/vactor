@@ -261,7 +261,7 @@ func TestNilPayloadSyncResponseDropped(t *testing.T) {
 	ts.Send(ref, "wake")
 	col.WaitForMessages(t, 1, 2*time.Second, "actor activated")
 
-	ts.LocalRouter(&vactor.EnvelopeResponse{ToActorRef: ref, RequestId: 1, Response: nil})
+	_ = ts.LocalRouter(&vactor.EnvelopeResponse{ToActorRef: ref, RequestId: 1, Response: nil})
 	testutil.WaitFor(t, 2*time.Second, "nil payload response dropped with log", func() bool {
 		return ts.LogContains("nil payload")
 	})
@@ -288,7 +288,7 @@ func TestSyncResponseToInactiveActorIsDropped(t *testing.T) {
 	starts := col.Starts()
 
 	// 此时 actor 已回收，投递响应不应把它拉起来
-	ts.LocalRouter(&vactor.EnvelopeResponse{
+	_ = ts.LocalRouter(&vactor.EnvelopeResponse{
 		ToActorRef: ref,
 		RequestId:  7,
 		Response:   &vactor.Response{Message: "late"},
@@ -357,7 +357,7 @@ func TestAsyncRequestWithoutFromReleasesCount(t *testing.T) {
 		testutil.WithTickInterval(10*time.Millisecond),
 		testutil.WithStopInterval(50*time.Millisecond),
 	)
-	ts.LocalRouter(&vactor.EnvelopeRequestAsync{
+	_ = ts.LocalRouter(&vactor.EnvelopeRequestAsync{
 		ToActorRef: ts.CreateActorRef(noFromType, "a"),
 		Message:    "q",
 		CallbackId: 1,
@@ -524,13 +524,13 @@ func TestAsyncResponseWithUnknownCallbackIgnored(t *testing.T) {
 	time.Sleep(50 * time.Millisecond) // 让 RequestAsync 完成登记
 
 	// CallbackId 不存在
-	ts.LocalRouter(&vactor.EnvelopeResponseAsync{
+	_ = ts.LocalRouter(&vactor.EnvelopeResponseAsync{
 		ToActorRef: caller,
 		Response:   &vactor.Response{Message: "x"},
 		CallbackId: 999,
 	})
 	// CallbackId 存在但 CallbackAddress 不匹配
-	ts.LocalRouter(&vactor.EnvelopeResponseAsync{
+	_ = ts.LocalRouter(&vactor.EnvelopeResponseAsync{
 		ToActorRef:      caller,
 		Response:        &vactor.Response{Message: "x"},
 		CallbackId:      1,

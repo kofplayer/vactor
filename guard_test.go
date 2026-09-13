@@ -144,7 +144,7 @@ func TestForeignSystemRefDoesNotKillGroup(t *testing.T) {
 		s.RegisterActorType(100, col.Creator())
 	})
 	badRef := &vactor.ActorRefImpl{SystemId: 9, ActorType: 100, ActorId: "x", GroupSlot: 1}
-	ts.LocalRouter(&vactor.EnvelopeSend{FromActorRef: nil, ToActorRef: badRef, Message: "poison"})
+	_ = ts.LocalRouter(&vactor.EnvelopeSend{FromActorRef: nil, ToActorRef: badRef, Message: "poison"})
 	time.Sleep(100 * time.Millisecond)
 	if !ts.LogContains("actor group process envelope panic") {
 		t.Fatal("expected group panic log")
@@ -159,7 +159,7 @@ func TestMalformedNotifyDoesNotKillActor(t *testing.T) {
 	ts := testutil.NewSystem(t, func(s vactor.System) {
 		s.RegisterActorType(100, col.Creator())
 	})
-	ts.LocalRouter(&vactor.EnvelopeNotify{
+	_ = ts.LocalRouter(&vactor.EnvelopeNotify{
 		FromActorRef: nil,
 		ToActorRefs:  []vactor.ActorRef{ts.CreateActorRef(100, "a")},
 		NotifyType:   vactor.NotifyTypeEvent,
@@ -271,7 +271,7 @@ func TestUnsupportedActorRefImplementationDropped(t *testing.T) {
 	})
 	// SystemId 与本机一致（能过 systemId 校验），但不是 *ActorRefImpl
 	bad := fakeActorRef{actorType: 210, actorId: "x", systemId: 0, groupSlot: 1}
-	ts.LocalRouter(&vactor.EnvelopeSend{ToActorRef: bad, Message: "m"})
+	_ = ts.LocalRouter(&vactor.EnvelopeSend{ToActorRef: bad, Message: "m"})
 	testutil.WaitFor(t, 2*time.Second, "unsupported ActorRef logged", func() bool {
 		return ts.LogContains("unsupported ActorRef implementation")
 	})
@@ -294,12 +294,12 @@ func TestWatchFromUnsupportedActorRefIgnored(t *testing.T) {
 	col.WaitForMessages(t, 1, 2*time.Second, "target activated")
 
 	bad := fakeActorRef{actorType: 211, actorId: "bad", systemId: 0, groupSlot: 1}
-	ts.LocalRouter(&vactor.EnvelopeWatch{FromActorRef: bad, ToActorRef: target, WatchType: 1, IsWatch: true})
+	_ = ts.LocalRouter(&vactor.EnvelopeWatch{FromActorRef: bad, ToActorRef: target, WatchType: 1, IsWatch: true})
 	testutil.WaitFor(t, 2*time.Second, "unsupported watcher logged", func() bool {
 		return ts.LogContains("ignore watch from unsupported ActorRef")
 	})
 	// 同样的自定义引用退订也不得 panic
-	ts.LocalRouter(&vactor.EnvelopeWatch{FromActorRef: bad, ToActorRef: target, WatchType: 1, IsWatch: false})
+	_ = ts.LocalRouter(&vactor.EnvelopeWatch{FromActorRef: bad, ToActorRef: target, WatchType: 1, IsWatch: false})
 	testutil.WaitFor(t, 2*time.Second, "unsupported unwatch logged", func() bool {
 		return ts.LogContains("ignore unwatch from unsupported ActorRef")
 	})

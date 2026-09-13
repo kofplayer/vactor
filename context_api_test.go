@@ -33,7 +33,7 @@ func TestContextAPIForwarding(t *testing.T) {
 				case "api":
 					ref := ctx.CreateActorRefEx(0, apiTargetType, "t")
 					// BatchSend 是笛卡尔广播：目标 ref 会依次收到全部 messages
-					ctx.BatchSend([]vactor.ActorRef{ref}, []interface{}{"b1", "b2"})
+					_ = ctx.BatchSend([]vactor.ActorRef{ref}, []interface{}{"b1", "b2"})
 					ctx.LocalRouter(&vactor.EnvelopeSend{
 						FromActorRef: ctx.GetActorRef(),
 						ToActorRef:   ref,

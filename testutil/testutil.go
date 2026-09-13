@@ -284,7 +284,7 @@ func FreePorts(t *testing.T, n int) []int {
 	listeners := make([]net.Listener, 0, n)
 	defer func() {
 		for _, l := range listeners {
-			l.Close()
+			_ = l.Close()
 		}
 	}()
 	ports := make([]int, 0, n)
