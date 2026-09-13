@@ -34,12 +34,6 @@ func (a *ActorRefImpl) GetGroupSlot() GroupSlot {
 	return a.GroupSlot
 }
 
-// type ActorRef struct {
-// 	SystemId
-// 	ActorType
-// 	ActorId
-// }
-
 const (
 	EventHubActorType ActorType = 1
 

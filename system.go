@@ -71,6 +71,12 @@ type System interface {
 	// BatchSend sends messages to multiple actors in batch.
 	// actorRefs: list of actor references to send messages to.
 	// messages: list of messages to send.
+	//
+	// Semantics: EVERY actor in actorRefs receives EVERY message in messages
+	// (cartesian broadcast), i.e. len(actorRefs)*len(messages) deliveries in total.
+	// It is NOT a pairwise zip of the two slices. An empty input slice yields no
+	// delivery at all.
+	//
 	// Returns: error if sending fails.
 	BatchSend(actorRefs []ActorRef, messages []interface{}) VAError
 
@@ -233,6 +239,11 @@ func (s *system) Start() {
 	}
 	if s.config.LogFunc != nil {
 		s.logFunc = s.config.LogFunc
+	}
+	// 配置自相矛盾：关掉了 tick 循环，却还设置了闲置回收时间。tick 是回收检查与
+	// 异步请求超时扫描的唯一时机，此组合下 DefaultStopInterval 永远不会生效。
+	if s.tickInterval <= 0 && s.defaultStopInterval > 0 {
+		s.LogWarn("TickInterval <= 0 disables the tick loop: idle-actor recycling and async-request timeout scanning are both off, but DefaultStopInterval=%v is set and will never take effect", s.defaultStopInterval)
 	}
 	s.config = nil
 	for _, group := range s.actorGroups {
@@ -446,10 +457,8 @@ func (s *system) IsRunning() bool {
 }
 
 func (s *system) defaultCreateActorRefEx(systemId SystemId, actorType ActorType, actorId ActorId) ActorRef {
-	// if actorType < ActorTypeStart {
-	// 	s.LogError("actorType %v is invalid, must large than %v", actorType, ActorTypeStart)
-	// 	return nil
-	// }
+	// 这里刻意不校验 actorType 下限：CreateActorRef 也用于 EventHubActorType(1)
+	// 这类保留类型，业务类型的下限校验放在 RegisterActorType。
 	groupSlot := GroupSlot(0)
 	hash := [2]uint8{0, 0}
 	str := string(actorId)

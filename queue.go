@@ -5,19 +5,17 @@ import (
 )
 
 type Queue[T any] struct {
-	buffer      *RingBuffer[T]
-	mutex       sync.Mutex
-	notEmpty    *sync.Cond
-	notifyClose chan struct{}
-	closed      bool
-	zero        T
+	buffer   *RingBuffer[T]
+	mutex    sync.Mutex
+	notEmpty *sync.Cond
+	closed   bool
+	zero     T
 }
 
 func NewQueue[T any]() *Queue[T] {
 	ch := &Queue[T]{
-		buffer:      NewRingBuffer[T](16),
-		notifyClose: make(chan struct{}),
-		closed:      false,
+		buffer: NewRingBuffer[T](16),
+		closed: false,
 	}
 	ch.notEmpty = sync.NewCond(&ch.mutex)
 	return ch
@@ -122,7 +120,6 @@ func (ch *Queue[T]) Close() {
 
 	if !ch.closed {
 		ch.closed = true
-		close(ch.notifyClose)
 		ch.notEmpty.Broadcast()
 	}
 }

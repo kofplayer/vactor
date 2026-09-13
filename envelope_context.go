@@ -78,6 +78,12 @@ type EnvelopeContext interface {
 	// BatchSend sends messages to multiple actors in batch.
 	// actorRefs: list of actor references to send messages to.
 	// messages: list of messages to send.
+	//
+	// Semantics: EVERY actor in actorRefs receives EVERY message in messages
+	// (cartesian broadcast), i.e. len(actorRefs)*len(messages) deliveries in total.
+	// It is NOT a pairwise zip of the two slices. An empty input slice yields no
+	// delivery at all.
+	//
 	// Returns: error if sending fails.
 	BatchSend(actorRefs []ActorRef, messages []interface{}) VAError
 
