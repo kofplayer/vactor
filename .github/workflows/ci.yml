@@ -48,3 +48,10 @@ jobs:
             exit 1
           fi
           echo "coverage ${pct}% >= 95%"
+
+      - name: bench (smoke)
+        # 冒烟：确保基准能编译、能跑通（bench_test.go 的往返/吞吐基准 +
+        # tick_bench_test.go 的扇出对比）。CI 机器性能波动大，不设性能阈值；
+        # -benchtime 1x 只跑一轮迭代以免拉长 CI，具体数字请在本机
+        # `go test -run '^$' -bench . -benchmem ./` 自行对比。
+        run: go test -run '^$' -bench . -benchtime 1x -timeout 5m ./
