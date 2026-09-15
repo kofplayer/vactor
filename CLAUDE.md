@@ -29,6 +29,8 @@
 - `RegisterActorType`、`SetRouter`、`SetCreateActorRefExFunc` 只能在 `Start()` 之前调用（Stop 后同样被拒绝）；未 Start 发消息返回 `ErrorCodeSystemNotStarted`；双重 `Start` 被拒绝；`Stop` 后不可重启。
 - panic 防护：actor 与 group 的信封处理整批 recover，用户 panic（含 `ctx.LogPanic`、异步回调 panic）只记日志；请求类消息 panic 且未 `Response` 时框架代为回错（语义见 [架构文档](docs/architecture.md)）。
 - `ctx.Response()` 仅对 Request 类消息有效，且**只能调用一次**；对 Send/Notify 调用会记错误日志。
+- **不要向自身发起同步 `ctx.Request`**：请求信封进的是 mailbox，而调用方 goroutine 正阻塞等待响应，永远处理不到它——必然超时，`timeout<=0` 时永久挂死该 actor。框架直接返回 `ErrorCodeSelfRequest`(5)（详见 [API 参考](docs/api-reference.md)）；自发请求请用 `ctx.RequestAsync`。
+- **背压是"丢弃"而非"反压调用方"**：`MaxMailboxDepth` 达上限时 `Send`/`BatchSend` 仍返回 nil，失败只在 Error 日志里。它覆盖 actor mailbox 与 **group mailbox** 两层（后者阈值为 `MaxMailboxDepth × GroupMailboxDepthFactor(8)`）。`OuterQueueMaxDepth` 达上限会**永久摘除**该外部订阅，需按消费者最坏停顿留足余量。
 - `SystemId=0` 表示"未指定"，本地单机模式下所有 actor 都属于本系统。
 - **SystemId 越界（单机版）**：`System` 内部的 `systemId` 恒为 0。若用 `CreateActorRefEx(非0, ...)` 造出 SystemId≠0 的引用并投递，`group.processEnvelope` 会 `LogPanic`——panic 被 group 的整批 recover 捕获，**该批消息全部静默丢弃**（进程不崩，但消息丢失且只有一行日志）。除非像 dvactor 那样用 `SetCreateActorRefExFunc` 接管寻址，不要手工指定非 0 的 SystemId。
 - 分布式扩展点：`SetRouter`（替换路由）与 `SetCreateActorRefExFunc`（替换寻址），dvactor 即通过这两个钩子接入——见 [dvactor/CLAUDE.md](../dvactor/CLAUDE.md)。

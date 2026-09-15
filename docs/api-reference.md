@@ -13,8 +13,15 @@
 | `DefaultStopInterval` | 10min | actor 闲置自动回收时间；0 = 永不回收 |
 | `TickInterval` | 1s | tick 周期；**≤0 关闭 tick（见下方警告）** |
 | `MailboxHighWaterMark` | 0（不告警） | actor mailbox 深度达到该值记 Warn（只告警不丢弃） |
-| `MaxMailboxDepth` | 0（不限制） | actor mailbox 深度上限；达到上限的新消息被丢弃并记 Error（慢消费者背压） |
+| `MaxMailboxDepth` | 0（不限制） | actor mailbox 深度上限；达到上限的新消息被丢弃并记 Error（慢消费者背压）。**同时作用于 group mailbox**，其阈值为 `MaxMailboxDepth × GroupMailboxDepthFactor(8)` |
+| `OuterQueueMaxDepth` | 0（不限制） | 外部 watch / 事件队列（`System.Watch` / `ListenEvent` 传入的 `*Queue[interface{}]`）深度上限；达上限后丢弃通知、记 Warn 并**摘除该订阅** |
 | `LogFunc` | stdout 打印 | 自定义日志（仅 Start 后生效；Start 前的日志走默认 stdout 实现） |
+
+> **背压是"丢弃"而不是"反压调用方"**：达到 `MaxMailboxDepth` 时 `Send` / `BatchSend` 仍返回 `nil`（停机等其他失败场景除外），失败只体现在 Error 日志里。若需要"不丢消息"，应在业务侧做确认/重试，而不是依赖背压。
+>
+> `MaxMailboxDepth` 覆盖两层：**actor mailbox**（单个慢消费者）与 **group mailbox**（组内全部流量的入口，信封在其中停留极短，故按 8 倍放大，避免把正常突发误判成过载）。只配前者会让人误以为已受保护。
+>
+> **`OuterQueueMaxDepth` 的摘除是永久性的**：一次溢出，该订阅就没了（这是为了防止无界增长——无界队列永不入队失败，既有的"入队失败即摘除"清理逻辑从未生效过）。请按消费者的最坏停顿时间留出余量，消费者侧应保证持续 `Dequeue`。
 
 > **⚠️ `TickInterval <= 0` 的完整后果**：tick 循环是框架做周期维护的唯一时机，关闭后不只是「不做闲置回收检查」，还会连带停掉 **异步请求超时扫描**——`RequestAsync` 指定了 timeout 也**永远不会触发超时回调**（回调永久悬挂），同时 `processingRequestCount` 无法通过超时路径归零，actor **永不回收**。仅当你的 actor 全部不需要回收、也不使用带超时的异步请求时才可关闭；否则请保留默认 1s。
 >
@@ -45,7 +52,7 @@ actor 内可用，包含 Logger 全部方法，另有：
 | `GetActorRef()` / `GetFromActorRef()` / `GetMessage()` | 当前 actor / 发送方（系统外发起为 nil）/ 消息体 |
 | `Send(ref, msg)` | actor 间单向消息（From 自动带自己） |
 | `RequestAsync(ref, msg, timeout, callback)` | 异步请求；回调在本 actor goroutine 执行；`timeout ≤ 0` 不超时 |
-| `Request(ref, msg, timeout) (interface{}, VAError)` | **同步**请求，阻塞本 actor goroutine（其他 actor 不受影响） |
+| `Request(ref, msg, timeout) (interface{}, VAError)` | **同步**请求，阻塞本 actor goroutine（其他 actor 不受影响）。**向自身发起会立即返回 `ErrorCodeSelfRequest`**（见下方说明） |
 | `Response(msg, err)` | 回应 Request；仅一次有效；非 Request 消息调用只记错误日志 |
 | `Watch(ref, watchType)` / `Unwatch` | actor 间订阅；通知以 `*MsgOnWatchMsg` 消息送达 |
 | `Notify(watchType, msg)` | 向本 actor 的所有 watcher（内部+外部）广播 |
@@ -56,6 +63,10 @@ actor 内可用，包含 Logger 全部方法，另有：
 | `SetSelfInvalid()` | 自我失效：拒收后续消息、Request 立即回错、1s 后回收（生命周期见架构文档） |
 | `CreateActorRef` / `CreateActorRefEx` | 同 System |
 | `LocalRouter(envelope)` | 把信封直接交给本地路由（代理类 actor 用，dvactor 的 WatchProxy 即如此） |
+
+> **⚠️ 不要向自身发起同步 `Request`**：`EnvelopeRequest` 走的是 mailbox，而调用方 goroutine 此刻正阻塞在等待响应上，处理不到自己发出的那条请求——必然超时；`timeout ≤ 0` 时更是**永久挂死该 actor**（此后它既不能处理任何消息，也不会被闲置回收）。框架因此直接返回 `ErrorCodeSelfRequest` 而不进入等待。
+>
+> 需要自发请求时用 `RequestAsync`——异步路径不阻塞调用方，响应回来后回调照常执行。
 
 ## 内置消息（[message.go](../message.go)）
 
@@ -83,4 +94,4 @@ const ActorTypeStart    ActorType = 10  // 业务类型下限
 
 ## 错误（[error.go](../error.go)）
 
-`VAError` = `error` + `Code() ErrorCode`。内置：`ErrorCodeSuccess(0)`、`ErrorCodeTimeout(1)`、`ErrorCodeInvalidActor(2)`、`ErrorCodeSystemNotStarted(3)`、`ErrorCodeHandlerPanic(4)`；业务自定义从 `ErrorCodeCustomStart(100)` 起。`Error()` 返回 `VaError(code=N)`，判错应比较 `Code()`。dvactor 侧码表见 [cluster.md](../../dvactor/docs/cluster.md)。
+`VAError` = `error` + `Code() ErrorCode`。内置：`ErrorCodeSuccess(0)`、`ErrorCodeTimeout(1)`、`ErrorCodeInvalidActor(2)`、`ErrorCodeSystemNotStarted(3)`、`ErrorCodeHandlerPanic(4)`、`ErrorCodeSelfRequest(5)`；业务自定义从 `ErrorCodeCustomStart(100)` 起。`Error()` 返回 `VaError(code=N)`，判错应比较 `Code()`。dvactor 侧码表见 [cluster.md](../../dvactor/docs/cluster.md)。
