@@ -156,6 +156,18 @@ func (a *actorContext) RequestAsync(actorRef ActorRef, msg interface{}, timeout 
 }
 
 func (a *actorContext) Request(actorRef ActorRef, msg interface{}, timeout time.Duration) (interface{}, VAError) {
+	if actorRef == nil {
+		a.system.LogError("actor %v request with nil target actor", a.actorRef)
+		return nil, NewVAError(ErrorCodeInvalidActor)
+	}
+	// 自请求必然死锁：EnvelopeRequest 走的是 mailbox，而本 goroutine 此刻正阻塞在
+	// 等待 syncRspChan 上，永远处理不到自己发出的那条请求。直接失败，而不是让调用方
+	// 干等到超时——timeout<=0 时它会永久挂死整个 actor（此后该 actor 既不能处理
+	// 任何消息，也不会被闲置回收）。需要自发的请求请用 RequestAsync（异步路径不阻塞）。
+	if a.isSelf(actorRef) {
+		a.system.LogError("actor %v request to itself is not allowed: the request can never be processed, use RequestAsync instead", a.actorRef)
+		return nil, NewVAError(ErrorCodeSelfRequest)
+	}
 	a.requestIdBase++
 	requestId := a.requestIdBase
 	a.waitingSyncRequestId = requestId
@@ -197,6 +209,15 @@ func (a *actorContext) Request(actorRef ActorRef, msg interface{}, timeout time.
 		}
 		a.system.LogWarn("actor %v drop stale sync response, requestId %v callbackAddress %v not match waiting %v/%v", a.actorRef, r.RequestId, r.CallbackAddress, a.waitingSyncRequestId, a.instanceId)
 	}
+}
+
+// isSelf 判断目标引用是否指向本 actor。
+// 按 SystemId+ActorType+ActorId 做逻辑相等判断，不比较 GroupSlot——同一 actor
+// 的两个引用可能经不同寻址路径（CreateActorRef / CreateActorRefEx）算出不同槽位。
+func (a *actorContext) isSelf(actorRef ActorRef) bool {
+	return actorRef.GetSystemId() == a.actorRef.GetSystemId() &&
+		actorRef.GetActorType() == a.actorRef.GetActorType() &&
+		actorRef.GetActorId() == a.actorRef.GetActorId()
 }
 
 // matchSyncResponse 判断一条同步响应是否属于本 actor 实例正在等待的那次请求。

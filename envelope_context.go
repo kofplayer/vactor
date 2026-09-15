@@ -36,6 +36,11 @@ type EnvelopeContext interface {
 	// actorRef: the target actor reference.
 	// msg: the message to send.
 	// timeout: maximum duration to wait for a response.
+	//
+	// Requesting the actor itself fails immediately with ErrorCodeSelfRequest: the
+	// request would deadlock until timeout (or forever when timeout <= 0), because the
+	// caller goroutine cannot process its own mailbox while waiting. Use RequestAsync
+	// for self-messaging.
 	// Returns: the response message and an error if timeout or failure occurs.
 	Request(actorRef ActorRef, msg interface{}, timeout time.Duration) (interface{}, VAError)
 

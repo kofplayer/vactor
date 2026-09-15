@@ -15,6 +15,10 @@ const (
 	// ErrorCodeHandlerPanic actor 处理请求消息时 panic，且用户未调用 Response，
 	// 框架代为回错以保证请求方不悬挂。
 	ErrorCodeHandlerPanic ErrorCode = 4
+	// ErrorCodeSelfRequest actor 向自身发起同步 Request。该请求永远等不到结果：
+	// 请求信封进的是 mailbox，而本 actor 正阻塞在等待响应上，处理不到它。
+	// 框架直接返回本错误而不是让调用方干等到超时（timeout<=0 时更是永久挂死）。
+	ErrorCodeSelfRequest ErrorCode = 5
 	// ErrorCodeCustomStart 用户自定义错误码起点。
 	ErrorCodeCustomStart ErrorCode = 100
 )
