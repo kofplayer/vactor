@@ -129,6 +129,13 @@ type SystemConfig struct {
 
 	// MaxMailboxDepth: actor mailbox 深度上限，达到上限的消息会被丢弃并记 Error，
 	// 避免慢消费者导致 mailbox 无界增长直至 OOM。0 表示不限制（保持旧行为）。
+	//
+	// 该上限同时作用于 **group mailbox**（组内全部流量的入口），其实际阈值为
+	// MaxMailboxDepth × GroupMailboxDepthFactor——group 只做分派、信封停留时间极短，
+	// 用同一绝对值会把正常突发误判成过载而误伤整组。
+	//
+	// 注意：超限是"丢弃"而不是"反压调用方"——Send/BatchSend 仍返回 nil（停机等
+	// 其他失败场景除外），错误只体现在日志里。
 	MaxMailboxDepth int
 }
 
@@ -303,6 +310,52 @@ func (s *system) sendEnvelope(msg Envelope) VAError {
 	return s.router(msg)
 }
 
+// GroupMailboxDepthFactor 是 group mailbox 深度上限相对于 MaxMailboxDepth 的放大倍数。
+//
+// 为什么放大：group mailbox 是该组全部流量的唯一入口，而信封在其中的停留时间极短
+// （group 每轮 DequeueAll 一次性全量取走）。它的深度反映的是"瞬时突发 + 本组分派
+// 能力"，而不是某个 actor 的消费能力。若与 actor mailbox 用同一个绝对值，突发流量
+// 会先把 group 打满，导致本不该丢的消息被提前丢弃（误伤整组）。
+const GroupMailboxDepthFactor = 8
+
+// groupMailboxDepthLimit 返回 group mailbox 的深度上限，0 表示不限制。
+func (s *system) groupMailboxDepthLimit() int {
+	if s.maxMailboxDepth <= 0 {
+		return 0
+	}
+	return s.maxMailboxDepth * GroupMailboxDepthFactor
+}
+
+// groupMailboxHighWater 返回 group mailbox 的高水位，0 表示不告警。
+func (s *system) groupMailboxHighWater() int {
+	if s.mailboxHighWaterMark <= 0 {
+		return 0
+	}
+	return s.mailboxHighWaterMark * GroupMailboxDepthFactor
+}
+
+// enqueueGroup 向 group mailbox 投递，返回 false 表示被丢弃（超限或 mailbox 已关闭）。
+// group mailbox 是所有进入该组消息的入口，若无上限，突发流量或分派能力不足会让它
+// 无界增长直至 OOM——MaxMailboxDepth 只保护 actor mailbox 是不够的。
+func (s *system) enqueueGroup(group *actorGroup, envelope Envelope) bool {
+	limit := s.groupMailboxDepthLimit()
+	mark := s.groupMailboxHighWater()
+	if limit <= 0 && mark <= 0 {
+		// 两项都没配：不额外取一次 Len()（它要加锁），保持原路径开销
+		return group.mailbox.Enqueue(envelope)
+	}
+	// 丢弃与告警是两件独立的事：只配水位不配上限时也必须能告警
+	depth := group.mailbox.Len()
+	if limit > 0 && depth >= limit {
+		s.LogError("actor group mailbox depth %d reached limit %d, message dropped", depth, limit)
+		return false
+	}
+	if mark > 0 && depth >= mark {
+		s.LogWarn("actor group mailbox depth %d exceeds high water mark %d", depth, mark)
+	}
+	return group.mailbox.Enqueue(envelope)
+}
+
 // LocalRouter 本地投递。mailbox 已关闭（系统停机中或已停止）时返回错误：
 // 静默丢弃会让调用方误以为消息已送达。
 func (s *system) LocalRouter(envelope Envelope) VAError {
@@ -318,7 +371,7 @@ func (s *system) LocalRouter(envelope Envelope) VAError {
 			groups[group] = append(groups[group], toActorRef)
 		}
 		for group, actorRefs := range groups {
-			if !group.mailbox.Enqueue(&EnvelopeBatchSend{
+			if !s.enqueueGroup(group, &EnvelopeBatchSend{
 				FromActorRef: e.FromActorRef,
 				ToActorRefs:  actorRefs,
 				Messages:     e.Messages,
@@ -333,7 +386,7 @@ func (s *system) LocalRouter(envelope Envelope) VAError {
 			groups[group] = append(groups[group], toActorRef)
 		}
 		for group, actorRefs := range groups {
-			if !group.mailbox.Enqueue(&EnvelopeNotify{
+			if !s.enqueueGroup(group, &EnvelopeNotify{
 				FromActorRef: e.FromActorRef,
 				ToActorRefs:  actorRefs,
 				NotifyType:   e.NotifyType,
@@ -351,7 +404,7 @@ func (s *system) LocalRouter(envelope Envelope) VAError {
 			break
 		}
 		group := s.getActorGroup(toActorRef)
-		if !group.mailbox.Enqueue(envelope) {
+		if !s.enqueueGroup(group, envelope) {
 			dropped = true
 		}
 	}
