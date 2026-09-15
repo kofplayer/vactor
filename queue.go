@@ -10,6 +10,11 @@ type Queue[T any] struct {
 	notEmpty *sync.Cond
 	closed   bool
 	zero     T
+	// maxDepth 队列深度上限。>0 时达到上限的入队被拒绝（返回 false）；
+	// 0 表示不限制（默认，保持旧行为）。
+	// 用途：外部 watch / 事件队列由调用方创建，若消费者停止读取，无界队列会
+	// 一直增长直至 OOM——设界后框架才能感知并摘除该订阅。
+	maxDepth int
 }
 
 func NewQueue[T any]() *Queue[T] {
@@ -21,10 +26,28 @@ func NewQueue[T any]() *Queue[T] {
 	return ch
 }
 
+// SetMaxDepth 设置队列深度上限，0 表示不限制。
+func (ch *Queue[T]) SetMaxDepth(maxDepth int) {
+	ch.mutex.Lock()
+	defer ch.mutex.Unlock()
+	ch.maxDepth = maxDepth
+}
+
+// MaxDepth 返回队列深度上限，0 表示不限制。
+func (ch *Queue[T]) MaxDepth() int {
+	ch.mutex.Lock()
+	defer ch.mutex.Unlock()
+	return ch.maxDepth
+}
+
 func (ch *Queue[T]) Enqueue(value T) bool {
 	ch.mutex.Lock()
 
 	if ch.closed {
+		ch.mutex.Unlock()
+		return false
+	}
+	if ch.maxDepth > 0 && ch.buffer.Count() >= ch.maxDepth {
 		ch.mutex.Unlock()
 		return false
 	}
@@ -39,6 +62,11 @@ func (ch *Queue[T]) EnqueueBatch(values []T) bool {
 	ch.mutex.Lock()
 
 	if ch.closed {
+		ch.mutex.Unlock()
+		return false
+	}
+	// 整批接受或整批拒绝：部分入队会让调用方无从判断哪些到达了
+	if ch.maxDepth > 0 && ch.buffer.Count()+len(values) > ch.maxDepth {
 		ch.mutex.Unlock()
 		return false
 	}

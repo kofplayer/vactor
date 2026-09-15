@@ -137,6 +137,15 @@ type SystemConfig struct {
 	// 注意：超限是"丢弃"而不是"反压调用方"——Send/BatchSend 仍返回 nil（停机等
 	// 其他失败场景除外），错误只体现在日志里。
 	MaxMailboxDepth int
+
+	// OuterQueueMaxDepth: 外部 watch / 事件队列（System.Watch / ListenEvent 传入的
+	// *Queue[interface{}]）的深度上限。达到上限后框架丢弃新通知、记 Warn 并摘除该
+	// 订阅，避免消费者停止读取时 queue 无界增长直至 OOM。
+	// 0 表示不限制（默认，保持旧行为）。
+	//
+	// 注意：摘除是永久性的——一次溢出一个订阅就没了。请根据消费者的最坏停顿时间
+	// 留出足够余量；消费者侧应保证持续 Dequeue。
+	OuterQueueMaxDepth int
 }
 
 func NewSystem(cfgFuncs ...SystemConfigFunc) System {
@@ -179,6 +188,7 @@ type system struct {
 	tickInterval         time.Duration
 	mailboxHighWaterMark int
 	maxMailboxDepth      int
+	outerQueueMaxDepth   int
 	router               Router
 	envelopeTick         *envelopeTick
 	config               *SystemConfig
@@ -238,6 +248,7 @@ func (s *system) Start() {
 	s.tickInterval = s.config.TickInterval
 	s.mailboxHighWaterMark = s.config.MailboxHighWaterMark
 	s.maxMailboxDepth = s.config.MaxMailboxDepth
+	s.outerQueueMaxDepth = s.config.OuterQueueMaxDepth
 	if s.router == nil {
 		s.router = s.LocalRouter
 	}
@@ -451,6 +462,10 @@ func (s *system) Request(actorRef ActorRef, msg interface{}, timeout time.Durati
 func (s *system) Watch(actorRef ActorRef, watchType WatchType, queue *Queue[interface{}]) {
 	if queue == nil {
 		return
+	}
+	// 队列由调用方创建，边界只能在这里统一施加（0 = 不限制）
+	if s.outerQueueMaxDepth > 0 {
+		queue.SetMaxDepth(s.outerQueueMaxDepth)
 	}
 	_ = s.sendEnvelope(&EnvelopeOuterWatch{
 		ToActorRef: actorRef,

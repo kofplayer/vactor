@@ -92,11 +92,12 @@ func (ts *TestSystem) DumpLogs(t *testing.T) {
 type SystemOpt func(*systemOptions)
 
 type systemOptions struct {
-	tickInterval    time.Duration
-	stopInterval    time.Duration
-	groupCount      uint16
-	highWaterMark   int
-	maxMailboxDepth int
+	tickInterval       time.Duration
+	stopInterval       time.Duration
+	groupCount         uint16
+	highWaterMark      int
+	maxMailboxDepth    int
+	outerQueueMaxDepth int
 }
 
 // WithTickInterval 设置 TickInterval（默认 10ms，加快异步超时类行为的触发）。
@@ -124,6 +125,11 @@ func WithMaxMailboxDepth(n int) SystemOpt {
 	return func(o *systemOptions) { o.maxMailboxDepth = n }
 }
 
+// WithOuterQueueMaxDepth 设置外部 watch/事件队列深度上限（默认 0，不限制）。
+func WithOuterQueueMaxDepth(n int) SystemOpt {
+	return func(o *systemOptions) { o.outerQueueMaxDepth = n }
+}
+
 // NewSystem 创建并启动一个测试用 System。setup 在 Start 之前完成类型注册，
 // 可为 nil。自动注册 t.Cleanup 停止系统；测试失败时输出最近日志辅助排障。
 func NewSystem(t *testing.T, setup func(s vactor.System), opts ...SystemOpt) *TestSystem {
@@ -141,6 +147,7 @@ func NewSystem(t *testing.T, setup func(s vactor.System), opts ...SystemOpt) *Te
 		sc.GroupCount = o.groupCount
 		sc.MailboxHighWaterMark = o.highWaterMark
 		sc.MaxMailboxDepth = o.maxMailboxDepth
+		sc.OuterQueueMaxDepth = o.outerQueueMaxDepth
 		sc.LogFunc = logs.LogFunc
 	})
 	if setup != nil {

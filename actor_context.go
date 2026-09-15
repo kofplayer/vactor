@@ -346,6 +346,11 @@ func (a *actorContext) notify(watchType WatchType, message interface{}, notifyTy
 		}
 		for _, queue := range queues {
 			delete(outerWatchers, queue)
+			// 入队失败只有两种原因：队列已关闭，或达到 OuterQueueMaxDepth。
+			// 两者都说明订阅方已不再消费——摘除它，避免每条通知都重试失败。
+			// 摘除时带上 actor 引用与 watchType，便于定位是哪个消费者掉队。
+			a.system.LogWarn("actor %v watchType %v: external watcher queue is closed or full, subscription removed",
+				a.actorRef, watchType)
 		}
 		if len(outerWatchers) == 0 {
 			delete(a.cache.outerWatcherss, watchType)
