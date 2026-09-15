@@ -92,6 +92,21 @@ const ActorTypeStart    ActorType = 10  // 业务类型下限
 
 `HashActorId(actorId) uint32`（[actor.go](../actor.go)）：ActorId 的 32 位 **FNV-1a** 哈希。单机取低 16 位作 `GroupSlot`（0 归一到 1）；dvactor 用 `hash % 节点数` 选放置节点、再用商做分片——**两处共用同一函数**，改动它会同时改变本机落组与跨节点放置（属跨版本行为契约，详见[架构文档](architecture.md)）。
 
+## 信封字段与兼容约定（[envelope.go](../envelope.go)）
+
+信封类型是导出的，分布式扩展（dvactor）与部分业务代码会手工构造它们。两个易错字段：
+
+| 字段 | 出现在 | 含义 |
+|------|--------|------|
+| `CallbackAddress` | `EnvelopeRequestAsync` / `EnvelopeResponseAsync` / `EnvelopeRequest` / `EnvelopeResponse` | 请求方 `actorContext` 的**实例 id**（`instanceId`，进程内原子自增），被请求方**原样回带**。用于剔除"上一代（已回收重建）context"的陈旧响应 |
+| `RequestId` / `CallbackId` | 同步 / 异步请求与响应 | 每实例单调递增的序号，用于把响应对回具体某次请求 |
+
+规则：
+
+- **`CallbackAddress` 由框架填写**。手工构造信封时置 `0` 即可——`0` 表示"未携带"，接收侧退化为只比对 `RequestId`，行为与加该字段之前完全一致。这是滚动升级期间新旧节点互通的基础。
+- 它是**进程内唯一，不是全局唯一**，只在发起节点本地比对，因此响应必须原路返回该节点（当前按 `ToActorRef.SystemId` 路由，成立）。若将来引入多跳/中继，需退化为 `(SystemId, instanceId)` 或保持该字段对中继透明。
+- 处理细节（group 侧代校验 + `requestId` 单调去旧、actor 侧双层匹配）见 [internals.md](internals.md)。
+
 ## 错误（[error.go](../error.go)）
 
 `VAError` = `error` + `Code() ErrorCode`。内置：`ErrorCodeSuccess(0)`、`ErrorCodeTimeout(1)`、`ErrorCodeInvalidActor(2)`、`ErrorCodeSystemNotStarted(3)`、`ErrorCodeHandlerPanic(4)`、`ErrorCodeSelfRequest(5)`；业务自定义从 `ErrorCodeCustomStart(100)` 起。`Error()` 返回 `VaError(code=N)`，判错应比较 `Code()`。dvactor 侧码表见 [cluster.md](../../dvactor/docs/cluster.md)。
