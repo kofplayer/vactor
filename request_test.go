@@ -131,6 +131,94 @@ func TestActorSyncRequestTimeout(t *testing.T) {
 	}
 }
 
+// 回归：actor 向自身发起同步 Request 必须立即失败，而不是阻塞到超时。
+// 请求信封进的是 mailbox，而调用方 goroutine 正阻塞等待响应，处理不到它——
+// 若放任其等待，timeout<=0 时该 actor 会永久挂死（既不收消息也不回收）。
+//
+// 这里刻意用有限超时（而非 0）来断言：一旦修复被回退，actor 会阻塞到超时后正常
+// 返回，用例随即失败且能正常清理；若用 timeout=0，actor 会永久挂死，连 System.Stop
+// 的 wg.Wait 都回不来，整个测试包会被拖到 go test 的 10 分钟超时——那不是可用的回归测试。
+func TestActorSelfRequestFailsImmediately(t *testing.T) {
+	const selfType vactor.ActorType = 113
+	const waitTimeout = 500 * time.Millisecond
+	var handled atomic.Int32
+	var issued atomic.Int32
+	done := make(chan vactor.ErrorCode, 4)
+	ts := testutil.NewSystem(t, func(s vactor.System) {
+		s.RegisterActorType(selfType, func() vactor.Actor {
+			return func(ctx vactor.EnvelopeContext) {
+				switch ctx.GetMessage().(type) {
+				case string:
+					handled.Add(1)
+					// 只发一次：修复被回退时请求会被投递回自己，若每次收到都再发一次
+					// 就会形成无限自激链，actor 永不退出、System.Stop 的 wg.Wait 也
+					// 回不来（整个测试包被拖到超时）。限次后回归只会"失败"，不会"卡死"。
+					if !issued.CompareAndSwap(0, 1) {
+						return
+					}
+					start := time.Now()
+					_, err := ctx.Request(ctx.GetActorRef(), "self", waitTimeout)
+					if err == nil {
+						done <- vactor.ErrorCodeSuccess
+						return
+					}
+					// 必须在超时之前就返回：证明没有真的进入等待
+					if elapsed := time.Since(start); elapsed > waitTimeout/2 {
+						t.Errorf("self request blocked for %v, want immediate failure", elapsed)
+					}
+					done <- err.Code()
+				}
+			}
+		})
+	})
+	ts.Send(ts.CreateActorRef(selfType, "s"), "go")
+
+	if code := testutil.WaitChan(t, done, 3*time.Second, "self request resolved"); code != vactor.ErrorCodeSelfRequest {
+		t.Fatalf("got error code %v, want ErrorCodeSelfRequest(%v)", code, vactor.ErrorCodeSelfRequest)
+	}
+	testutil.WaitFor(t, 2*time.Second, "self request logged", func() bool {
+		return ts.LogContains("request to itself is not allowed")
+	})
+	// 关键：请求没有被投递，因此不会二次触发 handler（否则会自我复制成无限链）
+	time.Sleep(300 * time.Millisecond)
+	if n := handled.Load(); n != 1 {
+		t.Fatalf("handler invoked %d times, want exactly 1 (request must not be delivered)", n)
+	}
+}
+
+// 异步自请求是合法的：不阻塞调用方，响应回来后回调照常执行。
+// 这是自同步请求的推荐替代写法。
+func TestActorSelfRequestAsyncSucceeds(t *testing.T) {
+	const selfType vactor.ActorType = 114
+	result := make(chan string, 1)
+	ts := testutil.NewSystem(t, func(s vactor.System) {
+		s.RegisterActorType(selfType, func() vactor.Actor {
+			return func(ctx vactor.EnvelopeContext) {
+				switch m := ctx.GetMessage().(type) {
+				case string:
+					if m == "self" {
+						// 收到自发的异步请求：正常应答
+						ctx.Response("echo:self", nil)
+						return
+					}
+					ctx.RequestAsync(ctx.GetActorRef(), "self", 2*time.Second,
+						func(msg interface{}, err vactor.VAError) {
+							if err != nil {
+								result <- "ERR:" + err.Error()
+							} else {
+								result <- msg.(string)
+							}
+						})
+				}
+			}
+		})
+	}, testutil.WithTickInterval(20*time.Millisecond))
+	ts.Send(ts.CreateActorRef(selfType, "s"), "go")
+	if got := testutil.WaitChan(t, result, 3*time.Second, "self async request"); got != "echo:self" {
+		t.Fatalf("got %q", got)
+	}
+}
+
 func TestRequestAsyncSuccess(t *testing.T) {
 	result := make(chan string, 8)
 	ts := testutil.NewSystem(t, func(s vactor.System) {
