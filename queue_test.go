@@ -225,3 +225,62 @@ func TestQueueTryDequeueAllBranches(t *testing.T) {
 		t.Fatalf("empty+closed = (%v,%v), want (nil,false)", msgs, ok)
 	}
 }
+
+// 队列深度上限：达到上限后入队被拒绝（返回 false），未配置时保持无界。
+func TestQueueMaxDepth(t *testing.T) {
+	q := vactor.NewQueue[int]()
+	if q.MaxDepth() != 0 {
+		t.Fatalf("default maxDepth = %d, want 0 (unlimited)", q.MaxDepth())
+	}
+	for i := 0; i < 1000; i++ {
+		if !q.Enqueue(i) {
+			t.Fatalf("enqueue %d should succeed when unlimited", i)
+		}
+	}
+	if q.Len() != 1000 {
+		t.Fatalf("depth = %d, want 1000", q.Len())
+	}
+
+	const max = 4
+	q2 := vactor.NewQueue[int]()
+	q2.SetMaxDepth(max)
+	if q2.MaxDepth() != max {
+		t.Fatalf("MaxDepth = %d, want %d", q2.MaxDepth(), max)
+	}
+	for i := 0; i < max; i++ {
+		if !q2.Enqueue(i) {
+			t.Fatalf("enqueue %d below the limit should succeed", i)
+		}
+	}
+	if q2.Enqueue(max) {
+		t.Fatal("enqueue beyond the limit should fail")
+	}
+	if q2.Len() != max {
+		t.Fatalf("depth = %d, want %d", q2.Len(), max)
+	}
+	// 取走一条后仍可继续入队：上限约束的是"当前深度"而非"累计条数"
+	if v, ok := q2.Dequeue(); !ok || v != 0 {
+		t.Fatalf("dequeue = (%v,%v), want (0,true)", v, ok)
+	}
+	if !q2.Enqueue(max) {
+		t.Fatal("enqueue should succeed after the queue drained below the limit")
+	}
+}
+
+// 批量入队整批接受或整批拒绝，不做部分入队。
+func TestQueueEnqueueBatchRespectsMaxDepth(t *testing.T) {
+	q := vactor.NewQueue[int]()
+	q.SetMaxDepth(5)
+	if !q.EnqueueBatch([]int{1, 2, 3}) {
+		t.Fatal("batch of 3 into an empty queue with limit 5 should succeed")
+	}
+	if q.EnqueueBatch([]int{4, 5, 6}) {
+		t.Fatal("batch that would exceed the limit must be rejected as a whole")
+	}
+	if q.Len() != 3 {
+		t.Fatalf("depth = %d, want 3 (no partial enqueue)", q.Len())
+	}
+	if !q.EnqueueBatch([]int{4, 5}) {
+		t.Fatal("batch that exactly fits should succeed")
+	}
+}

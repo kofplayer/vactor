@@ -235,3 +235,69 @@ func TestOuterWatchClosedQueueAutoUnsubscribes(t *testing.T) {
 	ts.Send(ts.CreateActorRef(101, "c"), "hello")
 	col.WaitForMessages(t, 1, 2*time.Second, "system healthy after closed queue")
 }
+
+// 回归：外部 watch 队列必须有界。此前它由调用方创建且完全无界，一旦消费者停止
+// 读取，Notify 会一直往里塞直到 OOM，而框架连一条日志都没有。
+func TestOuterWatchQueueBounded(t *testing.T) {
+	const limit = 3
+	queue := vactor.NewQueue[interface{}]()
+	ts := testutil.NewSystem(t, func(s vactor.System) {
+		s.RegisterActorType(100, func() vactor.Actor {
+			return func(ctx vactor.EnvelopeContext) {
+				switch ctx.GetMessage().(type) {
+				case string:
+					ctx.Notify(watchTestWT, "payload")
+				}
+			}
+		})
+	}, testutil.WithOuterQueueMaxDepth(limit))
+
+	ts.Watch(ts.CreateActorRef(100, "w"), watchTestWT, queue)
+	settle()
+	if queue.MaxDepth() != limit {
+		t.Fatalf("queue MaxDepth = %d, want %d (Watch must apply the bound)", queue.MaxDepth(), limit)
+	}
+
+	// 消费者完全不读取：无论 Notify 多少次，深度都不能超过上限
+	for i := 0; i < limit+10; i++ {
+		ts.Send(ts.CreateActorRef(100, "w"), "go")
+	}
+	testutil.WaitFor(t, 3*time.Second, "queue depth stays bounded", func() bool {
+		return queue.Len() == limit
+	})
+	time.Sleep(200 * time.Millisecond)
+	if got := queue.Len(); got > limit {
+		t.Fatalf("queue depth = %d, must not exceed %d", got, limit)
+	}
+
+	// 溢出必须被感知：记 Warn 并摘除订阅（否则每条通知都会静默重试失败）
+	testutil.WaitFor(t, 3*time.Second, "overflow warned", func() bool {
+		return ts.LogContains("closed or full")
+	})
+}
+
+// 未配置上限时保持旧行为（无界），避免给既有用户带来行为变化。
+func TestOuterWatchQueueUnboundedByDefault(t *testing.T) {
+	queue := vactor.NewQueue[interface{}]()
+	ts := testutil.NewSystem(t, func(s vactor.System) {
+		s.RegisterActorType(100, func() vactor.Actor {
+			return func(ctx vactor.EnvelopeContext) {
+				switch ctx.GetMessage().(type) {
+				case string:
+					ctx.Notify(watchTestWT, "payload")
+				}
+			}
+		})
+	})
+	ts.Watch(ts.CreateActorRef(100, "w"), watchTestWT, queue)
+	settle()
+	if queue.MaxDepth() != 0 {
+		t.Fatalf("queue MaxDepth = %d, want 0 (unlimited by default)", queue.MaxDepth())
+	}
+	for i := 0; i < 20; i++ {
+		ts.Send(ts.CreateActorRef(100, "w"), "go")
+	}
+	testutil.WaitFor(t, 3*time.Second, "all notifications delivered", func() bool {
+		return queue.Len() == 20
+	})
+}
