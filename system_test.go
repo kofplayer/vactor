@@ -2,6 +2,7 @@ package vactor
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -336,5 +337,161 @@ func TestRegisterActorTypeDuplicateOverrides(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&used); got != 2 {
 		t.Fatalf("last registration should win, used = %d", got)
+	}
+}
+
+// newUnstartedSingleGroupSystem 构造一个只有一个 group、且 **不启动 group goroutine**
+// 的 system：没人消费 group mailbox，深度只增不减，便于确定性地验证背压上限。
+func newUnstartedSingleGroupSystem(t *testing.T, cfgFuncs ...SystemConfigFunc) (*system, *actorGroup) {
+	t.Helper()
+	cfgFuncs = append(cfgFuncs, func(sc *SystemConfig) {
+		sc.GroupCount = 1
+		if sc.LogFunc == nil {
+			sc.LogFunc = func(LogLevel, string, ...interface{}) {}
+		}
+	})
+	s := NewSystem(cfgFuncs...).(*system)
+	s.actorGroups = []*actorGroup{newActorGroup(s)}
+	s.groupCount = 1
+	// Start() 才会把配置搬到字段上，而 Start 会启动 group goroutine 把 mailbox 抽干。
+	// 这里手动搬一次，等价于"已启动但暂停消费"的状态。
+	s.mailboxHighWaterMark = s.config.MailboxHighWaterMark
+	s.maxMailboxDepth = s.config.MaxMailboxDepth
+	// 同理，自定义 LogFunc 也是 Start() 才装载；上面的 cfgFunc 保证它非 nil。
+	s.logFunc = s.config.LogFunc
+	return s, s.actorGroups[0]
+}
+
+func testActorRef(actorType ActorType, id ActorId) ActorRef {
+	return &ActorRefImpl{SystemId: 0, GroupSlot: 1, ActorType: actorType, ActorId: id}
+}
+
+// 回归：group mailbox 必须有深度上限。它是组内全部流量的唯一入口，此前只有 actor
+// mailbox 受 MaxMailboxDepth 保护，group 侧无界——配置了背压的用户会误以为已受保护。
+func TestGroupMailboxDepthIsBounded(t *testing.T) {
+	const depth = 4
+	logs := make(chan string, 64)
+	s, group := newUnstartedSingleGroupSystem(t, func(sc *SystemConfig) {
+		sc.MaxMailboxDepth = depth
+		sc.LogFunc = func(level LogLevel, format string, args ...interface{}) {
+			if level == ErrorLevel {
+				select {
+				case logs <- fmt.Sprintf(format, args...):
+				default:
+				}
+			}
+		}
+	})
+	limit := depth * GroupMailboxDepthFactor
+
+	// 前 limit 条必须全部成功
+	for i := 0; i < limit; i++ {
+		if err := s.LocalRouter(&EnvelopeSend{ToActorRef: testActorRef(ActorTypeStart+1, "a"), Message: "m"}); err != nil {
+			t.Fatalf("enqueue %d below the limit should succeed, got %v", i, err)
+		}
+	}
+	if got := group.mailbox.Len(); got != limit {
+		t.Fatalf("group mailbox depth = %d, want %d", got, limit)
+	}
+
+	// 第 limit+1 条必须被丢弃并返回错误
+	err := s.LocalRouter(&EnvelopeSend{ToActorRef: testActorRef(ActorTypeStart+1, "a"), Message: "m"})
+	if err == nil {
+		t.Fatal("enqueue beyond the limit should fail")
+	}
+	if got := group.mailbox.Len(); got != limit {
+		t.Fatalf("dropped message must not be enqueued, depth = %d, want %d", got, limit)
+	}
+	select {
+	case line := <-logs:
+		if !strings.Contains(line, "reached limit") {
+			t.Fatalf("expected a drop log, got %q", line)
+		}
+	default:
+		t.Fatal("expected an error log for the dropped message")
+	}
+}
+
+// 批量/通知分支也要走同一个上限，否则扇出大的路径会绕过背压。
+func TestGroupMailboxDepthAppliesToBatchAndNotify(t *testing.T) {
+	const depth = 2
+	s, group := newUnstartedSingleGroupSystem(t, func(sc *SystemConfig) {
+		sc.MaxMailboxDepth = depth
+	})
+	limit := depth * GroupMailboxDepthFactor
+	refs := []ActorRef{testActorRef(ActorTypeStart+1, "a"), testActorRef(ActorTypeStart+1, "b")}
+
+	failed := 0
+	for i := 0; i < limit+3; i++ {
+		if err := s.LocalRouter(&EnvelopeBatchSend{ToActorRefs: refs, Messages: []interface{}{"m"}}); err != nil {
+			failed++
+		}
+	}
+	if failed != 3 {
+		t.Fatalf("batch send: %d enqueues failed, want 3 (only %d fit)", failed, limit)
+	}
+	if got := group.mailbox.Len(); got != limit {
+		t.Fatalf("batch send depth = %d, want %d", got, limit)
+	}
+
+	// 清空后 notify 分支同样受限
+	for group.mailbox.Len() > 0 {
+		_, _ = group.mailbox.TryDequeue()
+	}
+	failed = 0
+	for i := 0; i < limit+3; i++ {
+		if err := s.LocalRouter(&EnvelopeNotify{
+			ToActorRefs: refs,
+			NotifyType:  NotifyTypeWatch,
+			Message:     &MsgOnWatchMsg{},
+		}); err != nil {
+			failed++
+		}
+	}
+	if failed != 3 {
+		t.Fatalf("notify: %d enqueues failed, want 3 (only %d fit)", failed, limit)
+	}
+}
+
+// 未配置上限时保持旧行为（无界），避免给既有用户带来行为变化。
+func TestGroupMailboxDepthUnlimitedByDefault(t *testing.T) {
+	s, group := newUnstartedSingleGroupSystem(t)
+	for i := 0; i < 2000; i++ {
+		if err := s.LocalRouter(&EnvelopeSend{ToActorRef: testActorRef(ActorTypeStart+1, "a"), Message: "m"}); err != nil {
+			t.Fatalf("enqueue %d should succeed when unlimited, got %v", i, err)
+		}
+	}
+	if got := group.mailbox.Len(); got != 2000 {
+		t.Fatalf("depth = %d, want 2000", got)
+	}
+}
+
+// 高水位只告警不丢弃。
+func TestGroupMailboxHighWaterMarkWarnsOnly(t *testing.T) {
+	warns := make(chan string, 64)
+	s, _ := newUnstartedSingleGroupSystem(t, func(sc *SystemConfig) {
+		sc.MailboxHighWaterMark = 2
+		sc.LogFunc = func(level LogLevel, format string, args ...interface{}) {
+			if level == WarnLevel {
+				select {
+				case warns <- fmt.Sprintf(format, args...):
+				default:
+				}
+			}
+		}
+	})
+	mark := 2 * GroupMailboxDepthFactor
+	for i := 0; i < mark+1; i++ {
+		if err := s.LocalRouter(&EnvelopeSend{ToActorRef: testActorRef(ActorTypeStart+1, "a"), Message: "m"}); err != nil {
+			t.Fatalf("high water mark must not drop messages, enqueue %d got %v", i, err)
+		}
+	}
+	select {
+	case line := <-warns:
+		if !strings.Contains(line, "high water mark") {
+			t.Fatalf("expected a high water warning, got %q", line)
+		}
+	default:
+		t.Fatal("expected a high water warning")
 	}
 }
