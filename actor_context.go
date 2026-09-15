@@ -96,10 +96,14 @@ type actorContext struct {
 	instanceId                uint64
 	waitingSyncRequestId      CallbackId
 	syncRspChan               chan *EnvelopeResponse
-	stopInterval              time.Duration
-	onTickMsg                 *MsgOnTick
-	processingRequestCount    int32
-	isInvalid                 bool
+	// lastSyncRspRequestId 记录已投递给 syncRspChan 的最大 requestId。
+	// 仅由 group goroutine 读写（它是 syncRspChan 的唯一写入者）：用于在同代内
+	// 丢弃"迟到旧响应"，避免其排空掉正在等待的新响应。context 重建后归零。
+	lastSyncRspRequestId   CallbackId
+	stopInterval           time.Duration
+	onTickMsg              *MsgOnTick
+	processingRequestCount int32
+	isInvalid              bool
 
 	// 以下字段是上面那些"仅 actor goroutine 访问"的状态的原子镜像，
 	// 供 group 在投递 tick 前做无锁粗筛（group 与 actor 在不同 goroutine 上）。
@@ -156,10 +160,11 @@ func (a *actorContext) Request(actorRef ActorRef, msg interface{}, timeout time.
 	requestId := a.requestIdBase
 	a.waitingSyncRequestId = requestId
 	err := a.system.sendEnvelope(&EnvelopeRequest{
-		FromActorRef: a.actorRef,
-		ToActorRef:   actorRef,
-		Message:      msg,
-		RequestId:    requestId,
+		FromActorRef:    a.actorRef,
+		ToActorRef:      actorRef,
+		Message:         msg,
+		RequestId:       requestId,
+		CallbackAddress: a.instanceId,
 	})
 
 	if err != nil {
@@ -173,11 +178,11 @@ func (a *actorContext) Request(actorRef ActorRef, msg interface{}, timeout time.
 		for {
 			select {
 			case r := <-a.syncRspChan:
-				if r.RequestId == a.waitingSyncRequestId {
+				if a.matchSyncResponse(r) {
 					a.waitingSyncRequestId = 0
 					return r.Message, r.Error
 				}
-				a.system.LogWarn("actor %v drop stale sync response, requestId %v not match waiting %v", a.actorRef, r.RequestId, a.waitingSyncRequestId)
+				a.system.LogWarn("actor %v drop stale sync response, requestId %v callbackAddress %v not match waiting %v/%v", a.actorRef, r.RequestId, r.CallbackAddress, a.waitingSyncRequestId, a.instanceId)
 			case <-timer.C:
 				a.waitingSyncRequestId = 0
 				return nil, NewVAError(ErrorCodeTimeout)
@@ -186,12 +191,23 @@ func (a *actorContext) Request(actorRef ActorRef, msg interface{}, timeout time.
 	}
 	for {
 		r := <-a.syncRspChan
-		if r.RequestId == a.waitingSyncRequestId {
+		if a.matchSyncResponse(r) {
 			a.waitingSyncRequestId = 0
 			return r.Message, r.Error
 		}
-		a.system.LogWarn("actor %v drop stale sync response, requestId %v not match waiting %v", a.actorRef, r.RequestId, a.waitingSyncRequestId)
+		a.system.LogWarn("actor %v drop stale sync response, requestId %v callbackAddress %v not match waiting %v/%v", a.actorRef, r.RequestId, r.CallbackAddress, a.waitingSyncRequestId, a.instanceId)
 	}
+}
+
+// matchSyncResponse 判断一条同步响应是否属于本 actor 实例正在等待的那次请求。
+// 必须同时满足 requestId 匹配与"代一致"：CallbackAddress 非 0 时必须等于本实例
+// id，否则视为上一代（已重建）context 的陈旧响应。CallbackAddress 为 0 表示对端
+// 未携带（旧版本/手工构造），退化为只比对 requestId 以保持向后兼容。
+func (a *actorContext) matchSyncResponse(r *EnvelopeResponse) bool {
+	if r.RequestId != a.waitingSyncRequestId {
+		return false
+	}
+	return r.CallbackAddress == 0 || r.CallbackAddress == a.instanceId
 }
 
 func (a *actorContext) Watch(actorRef ActorRef, watchType WatchType) {
@@ -504,7 +520,8 @@ func (a *actorContext) processBatch(msgs []Envelope) (stop bool) {
 					message:      t.Message,
 					fromActorRef: t.FromActorRef,
 				},
-				requestId: t.RequestId,
+				requestId:       t.RequestId,
+				callbackAddress: t.CallbackAddress,
 			}
 			a.processingRequestCount++
 		case *EnvelopeOuterRequest:

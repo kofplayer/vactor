@@ -223,8 +223,9 @@ func (a *envelopeContextRequestAsync) respondErrorOnce() {
 
 type envelopeContextRequest struct {
 	*envelopeContextBase
-	requestId CallbackId
-	doSendRsp bool
+	requestId       CallbackId
+	callbackAddress uint64
+	doSendRsp       bool
 }
 
 func (a *envelopeContextRequest) Response(msg interface{}, err VAError) {
@@ -244,9 +245,10 @@ func (a *envelopeContextRequest) Response(msg interface{}, err VAError) {
 			Message: msg,
 			Error:   err,
 		},
-		FromActorRef: a.actorRef,
-		ToActorRef:   a.fromActorRef,
-		RequestId:    a.requestId,
+		FromActorRef:    a.actorRef,
+		ToActorRef:      a.fromActorRef,
+		RequestId:       a.requestId,
+		CallbackAddress: a.callbackAddress,
 	})
 	a.processingRequestCount--
 }

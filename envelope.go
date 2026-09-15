@@ -55,6 +55,10 @@ type EnvelopeRequest struct {
 	ToActorRef   ActorRef
 	Message      interface{}
 	RequestId    CallbackId
+	// CallbackAddress 是请求方 actorContext 实例 id：被请求方响应时原样回带，
+	// 供请求方剔除"上一代（已重建）实例"的陈旧响应。0 表示未携带
+	// （旧版本对端、或测试中手工构造的信封），此时退化为只比对 RequestId。
+	CallbackAddress uint64
 }
 
 func (e *EnvelopeRequest) GetToActorRef() ActorRef {
@@ -71,6 +75,9 @@ type EnvelopeResponse struct {
 	FromActorRef ActorRef
 	ToActorRef   ActorRef
 	RequestId    CallbackId
+	// CallbackAddress 原样回带请求方 EnvelopeRequest.CallbackAddress，用于剔除
+	// 上一代 context 的陈旧响应；0 表示未携带（向后兼容）。
+	CallbackAddress uint64
 }
 
 func (e *EnvelopeResponse) GetToActorRef() ActorRef {

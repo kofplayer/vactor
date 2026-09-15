@@ -113,9 +113,25 @@ func (m *actorGroup) processEnvelope(toActorRef ActorRef, envelopes Envelope) {
 			m.system.LogError("actor %v receive sync response with nil payload, dropped", toActorRef)
 			return
 		}
-		// syncRspChan 容量为 1：先排空可能残留的陈旧响应，否则本次有效响应会被
-		// select-default 丢弃——那会让该 actor 之后的每一次同步请求都超时。
-		// 越晚到达的响应越新，排空旧值是安全的。
+		// 代校验：CallbackAddress 非 0 时必须等于当前 context 实例 id，否则是
+		// 上一代（已回收重建）实例的陈旧响应。必须在排空/入队之前丢弃：既不让它
+		// 占住容量为 1 的通道，也不让它参与后续 requestId 比较而污染新实例基准。
+		// CallbackAddress 为 0 表示对端未携带（旧版本），保持向后兼容不再校验。
+		if resp.CallbackAddress != 0 && resp.CallbackAddress != actorCtx.instanceId {
+			m.system.LogDebug("actor %v drop sync response from stale instance %v, requestId %v", toActorRef, resp.CallbackAddress, resp.RequestId)
+			return
+		}
+		// 同代内按 requestId 单调去旧：requestId 由同一实例的 requestIdBase 单调递增，
+		// 因此"更小的 requestId = 更旧的请求"。若已投递过 >= 本条 requestId 的响应，
+		// 本条必为迟到旧响应，直接丢弃——放行它会排空掉通道里正在等待的新响应。
+		// 注意：不能假设"越晚到达越新"，跨目标乱序时迟到的旧响应可能后到。
+		if resp.RequestId <= actorCtx.lastSyncRspRequestId {
+			m.system.LogDebug("actor %v drop stale sync response, requestId %v <= last delivered %v", toActorRef, resp.RequestId, actorCtx.lastSyncRspRequestId)
+			return
+		}
+		// 本条严格更新（requestId 更大）：通道里可能残留的响应必然更旧（否则上面的
+		// 判定会先命中），排空它们再投递是安全的——容量 1 的通道不会因此丢掉正在
+		// 等待的新响应。
 		for drained := false; !drained; {
 			select {
 			case stale := <-actorCtx.syncRspChan:
@@ -126,6 +142,7 @@ func (m *actorGroup) processEnvelope(toActorRef ActorRef, envelopes Envelope) {
 		}
 		select {
 		case actorCtx.syncRspChan <- resp:
+			actorCtx.lastSyncRspRequestId = resp.RequestId
 		default:
 			m.system.LogError("actor %v sync response channel is full, message dropped", toActorRef)
 		}
