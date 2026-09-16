@@ -48,7 +48,30 @@ BatchSend/Notify（多收件人）先在 LocalRouter 按 group 拆分投递，gr
    - 同时处理超时的 RequestAsync 回调（回调收到 `ErrorCodeTimeout`）。
    - 否则向 actor 投递 `MsgOnTick`（可在 actor 内做周期任务，如示例中用 `ctx.Notify` 推 watch）。
 
-   > **扇出优化**：group 先用无锁原子字段粗筛（`actorContext.needTick`），只向"确实需要"的 actor 投递——未声明关闭 tick 的 actor、存在未完成异步回调的 actor、以及闲置回收条件已满足的 actor。声明 `SetTickEnabled(false)` 的纯空闲 actor 不再每秒被入队与唤醒（2 万 actor 的 tick 扇出开销约 30.8ms → 11.1ms）。
+   > **扇出优化**：group 先用无锁原子字段粗筛（`actorContext.needTick`），只向"确实需要"的 actor 投递——未声明关闭 tick 的 actor、存在未完成异步回调的 actor、以及闲置回收条件已满足的 actor。声明 `SetTickEnabled(false)` 的纯空闲 actor 不再每秒被入队与唤醒。
+
+### 性能建议：什么时候该调 `SetTickEnabled(false)`
+
+**默认是开启的（保持向后兼容），收益需要 actor 显式声明才拿得到。**
+
+先看清代价：默认配置下每个存活 actor 每秒都会收到一条 `MsgOnTick`——一次入队 + 一次 goroutine 唤醒 + 一次用户回调。实测（i5-12490F，2 万 actor 一轮扇出）：**投递 tick 的边际开销约 12.9ms**。换算成稳态占用，2 万 actor ≈ 1.3% 单核；**100 万 actor ≈ 65% 单核**。
+
+该关就关，只要你的 actor **不处理 `MsgOnTick`**：
+
+| 你的 actor | 建议 |
+|-----------|------|
+| 只响应 Send/Request/Watch/Event，没有周期任务 | `MsgOnStart` 里调 `ctx.SetTickEnabled(false)` |
+| 在 `MsgOnTick` 里做心跳、超时、周期推送 | 保持默认（开着） |
+
+**关了不会丢任何框架能力**——`needTick` 会在框架确有需要时继续投递：
+
+- **异步请求超时扫描照常**：`RequestAsync` 未完成期间 `pendingAsyncCallback > 0`，actor 照收 tick，超时回调正常触发（回归测试 `TestSetTickEnabledStillScansAsyncTimeout`）。
+- **闲置回收照常**：`stopInterval > 0` 且闲置时间已到时仍会收到 tick 并完成回收（`TestSetTickEnabledStillRecyclesIdleActor`）。
+- 唯一的区别是**纯空闲**时不再被每秒唤醒（`TestSetTickEnabledSkipsIdleTicks`）。
+
+> 框架自身的 actor 已经这么做了：dvactor 的 `WatchProxy` / `RequestProxy` 在 `MsgOnStart` 中声明关闭周期 tick（它们没有 `MsgOnTick` 分支）。
+>
+> **为什么不默认关闭**：`SetTickEnabled(true)` 的默认值一旦反转，所有依赖 `MsgOnTick` 的既有业务会静默失去周期回调。这属于破坏性变更，需要走主版本号，而不是在补丁版本里悄悄改。目前的做法是"保持默认 + 文档给出明确指引"。
 4. **回收**：goroutine 退出前收到 `MsgOnStop`，然后向 group mailbox 投 `envelopeStopedReport`；group 将 watcher cache 存入 `actorCaches`，若 mailbox 中还有积压消息则立即重建 context 继续处理。
 5. **SetSelfInvalid**：置 `isInvalid`，此后所有消息被拒（Request 类立即回 `ErrorCodeInvalidActor`），stopInterval 缩为 1 秒触发快速回收；之后仍可被新消息重新激活。
 
