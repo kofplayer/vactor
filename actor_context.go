@@ -83,11 +83,14 @@ type callbackInfo struct {
 }
 
 type actorContext struct {
-	system                    *system
-	group                     *actorGroup
-	actorRef                  ActorRef
-	mailbox                   *Queue[Envelope]
-	onMessage                 func(EnvelopeContext)
+	system    *system
+	group     *actorGroup
+	actorRef  ActorRef
+	mailbox   *Queue[Envelope]
+	onMessage func(EnvelopeContext)
+	// batchBuf 复用每轮 DequeueAll 的结果切片（仅本 actor goroutine 访问），
+	// 稳态下不再为每一批分配新切片。
+	batchBuf                  []Envelope
 	latestMsgTime             time.Time
 	waitingAsyncCallbackInfos map[CallbackId]*callbackInfo
 	cache                     *actorContextCache
@@ -465,10 +468,11 @@ func (a *actorContext) start() {
 			message:      &MsgOnStart{},
 		})
 		for {
-			msgs, ok := a.mailbox.DequeueAll()
+			msgs, ok := a.mailbox.dequeueAllInto(a.batchBuf)
 			if !ok {
 				return
 			}
+			a.batchBuf = msgs
 			if a.processBatch(msgs) {
 				return
 			}

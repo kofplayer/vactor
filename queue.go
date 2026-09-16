@@ -112,6 +112,24 @@ func (ch *Queue[T]) DequeueAll() ([]T, bool) {
 	return result, true
 }
 
+// dequeueAllInto 与 DequeueAll 语义相同，但复用调用方提供的切片。
+// 返回的切片只在调用方处理完这一批之前有效——mailbox 消费循环是唯一的使用者，
+// 它天然满足"处理完上一批才取下一批"。公开的 DequeueAll 保持每次返回新切片，
+// 避免外部调用方沿用返回结果时被静默改写。
+func (ch *Queue[T]) dequeueAllInto(dst []T) ([]T, bool) {
+	ch.mutex.Lock()
+	for ch.buffer.Count() == 0 && !ch.closed {
+		ch.notEmpty.Wait()
+	}
+	if ch.buffer.Count() == 0 && ch.closed {
+		ch.mutex.Unlock()
+		return dst[:0], false
+	}
+	result := ch.buffer.popAllInto(dst)
+	ch.mutex.Unlock()
+	return result, true
+}
+
 func (ch *Queue[T]) TryDequeue() (T, bool) {
 	ch.mutex.Lock()
 
@@ -138,6 +156,23 @@ func (ch *Queue[T]) TryDequeueAll() ([]T, bool) {
 		return nil, true
 	}
 	result := ch.buffer.PopAll()
+	ch.mutex.Unlock()
+	return result, true
+}
+
+// tryDequeueAllInto 是 TryDequeueAll 的复用版本（非阻塞），复用契约与 dequeueAllInto 相同。
+func (ch *Queue[T]) tryDequeueAllInto(dst []T) ([]T, bool) {
+	ch.mutex.Lock()
+
+	if ch.buffer.Count() == 0 {
+		if ch.closed {
+			ch.mutex.Unlock()
+			return dst[:0], false
+		}
+		ch.mutex.Unlock()
+		return dst[:0], true
+	}
+	result := ch.buffer.popAllInto(dst)
 	ch.mutex.Unlock()
 	return result, true
 }

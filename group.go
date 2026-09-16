@@ -18,6 +18,9 @@ type actorGroup struct {
 	actorMailboxes map[ActorRefImpl]*Queue[Envelope]
 	actorCaches    map[ActorRefImpl]*actorContextCache
 	actorContexts  map[ActorRefImpl]*actorContext
+	// batchBuf 复用每轮 DequeueAll 的结果切片（仅 group goroutine 访问），
+	// 稳态下不再为每一批分配新切片。
+	batchBuf []Envelope
 }
 
 func (m *actorGroup) start() {
@@ -28,7 +31,7 @@ func (m *actorGroup) start() {
 	go func() {
 		defer m.system.wg.Done()
 		for {
-			envelopes, ok := m.mailbox.DequeueAll()
+			envelopes, ok := m.mailbox.dequeueAllInto(m.batchBuf)
 			if !ok {
 				// mailbox 已关闭（停机中）：关闭本组全部 actor 的 mailbox 促其退出
 				for _, ctx := range m.actorContexts {
@@ -36,6 +39,7 @@ func (m *actorGroup) start() {
 				}
 				return
 			}
+			m.batchBuf = envelopes
 			m.processBatch(envelopes)
 		}
 	}()
