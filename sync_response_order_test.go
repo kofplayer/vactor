@@ -103,7 +103,7 @@ func TestGroupSyncResponseInstanceGuard(t *testing.T) {
 func msgs(rsps []*EnvelopeResponse) []interface{} {
 	out := make([]interface{}, 0, len(rsps))
 	for _, r := range rsps {
-		out = append(out, r.Response.Message)
+		out = append(out, r.Message)
 	}
 	return out
 }
