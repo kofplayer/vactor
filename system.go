@@ -288,8 +288,40 @@ func (s *system) Start() {
 	}
 }
 
+// getActorGroupIndex 计算 actor 所属 group 的下标。
+// 取模用 len(actorGroups) 而不是 groupCount：两者本应相等，但用切片长度能保证
+// 结果不越界（调用点都已确认 len(actorGroups) != 0）。
+func (s *system) getActorGroupIndex(actorRef ActorRef) uint16 {
+	return uint16(actorRef.GetGroupSlot()-1) % uint16(len(s.actorGroups))
+}
+
 func (s *system) getActorGroup(actorRef ActorRef) *actorGroup {
-	return s.actorGroups[uint16(actorRef.GetGroupSlot()-1)%s.groupCount]
+	return s.actorGroups[s.getActorGroupIndex(actorRef)]
+}
+
+// bucketByGroup 把收件人按所属 group 分桶，返回的切片下标即 group 下标（空桶为 nil）。
+//
+// 两趟分配：先计数，再按精确容量一次性分配。若单趟 append 到 nil 切片，每个桶都会
+// 经历 1,2,4,...,N 的倍增——1000 个收件人摊到 4 个 group 就是约 36 次分配；这里
+// 只分配 2 个定长切片 + 非空桶各一次。顺带把投递顺序从"map 遍历"变成"按 group
+// 下标"，不再依赖 map 的随机顺序。
+func (s *system) bucketByGroup(refs []ActorRef) [][]ActorRef {
+	n := len(s.actorGroups)
+	counts := make([]int, n)
+	for _, ref := range refs {
+		counts[s.getActorGroupIndex(ref)]++
+	}
+	buckets := make([][]ActorRef, n)
+	for i, c := range counts {
+		if c > 0 {
+			buckets[i] = make([]ActorRef, 0, c)
+		}
+	}
+	for _, ref := range refs {
+		i := s.getActorGroupIndex(ref)
+		buckets[i] = append(buckets[i], ref)
+	}
+	return buckets
 }
 
 func (s *system) BatchSend(actorRefs []ActorRef, messages []interface{}) VAError {
@@ -376,13 +408,11 @@ func (s *system) LocalRouter(envelope Envelope) VAError {
 	dropped := false
 	switch e := envelope.(type) {
 	case *EnvelopeBatchSend:
-		groups := make(map[*actorGroup][]ActorRef)
-		for _, toActorRef := range e.ToActorRefs {
-			group := s.getActorGroup(toActorRef)
-			groups[group] = append(groups[group], toActorRef)
-		}
-		for group, actorRefs := range groups {
-			if !s.enqueueGroup(group, &EnvelopeBatchSend{
+		for i, actorRefs := range s.bucketByGroup(e.ToActorRefs) {
+			if len(actorRefs) == 0 {
+				continue
+			}
+			if !s.enqueueGroup(s.actorGroups[i], &EnvelopeBatchSend{
 				FromActorRef: e.FromActorRef,
 				ToActorRefs:  actorRefs,
 				Messages:     e.Messages,
@@ -391,13 +421,11 @@ func (s *system) LocalRouter(envelope Envelope) VAError {
 			}
 		}
 	case *EnvelopeNotify:
-		groups := make(map[*actorGroup][]ActorRef)
-		for _, toActorRef := range e.ToActorRefs {
-			group := s.getActorGroup(toActorRef)
-			groups[group] = append(groups[group], toActorRef)
-		}
-		for group, actorRefs := range groups {
-			if !s.enqueueGroup(group, &EnvelopeNotify{
+		for i, actorRefs := range s.bucketByGroup(e.ToActorRefs) {
+			if len(actorRefs) == 0 {
+				continue
+			}
+			if !s.enqueueGroup(s.actorGroups[i], &EnvelopeNotify{
 				FromActorRef: e.FromActorRef,
 				ToActorRefs:  actorRefs,
 				NotifyType:   e.NotifyType,

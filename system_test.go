@@ -453,6 +453,77 @@ func TestGroupMailboxDepthAppliesToBatchAndNotify(t *testing.T) {
 	}
 }
 
+// 扇出分桶：无丢失、无错桶、桶内顺序稳定，且容量精确（说明没有经历 append 倍增）。
+func TestBucketByGroup(t *testing.T) {
+	const groups = 4
+	s := NewSystem(func(sc *SystemConfig) {
+		sc.LogFunc = func(LogLevel, string, ...interface{}) {}
+	}).(*system)
+	s.actorGroups = make([]*actorGroup, groups)
+	for i := range s.actorGroups {
+		s.actorGroups[i] = newActorGroup(s)
+	}
+
+	// 41 个收件人不整除，覆盖各桶数量不均的情形；用 ActorType 携带输入下标便于校验顺序
+	const total = 41
+	refs := make([]ActorRef, total)
+	for i := range refs {
+		refs[i] = &ActorRefImpl{
+			GroupSlot: GroupSlot(i%groups + 1),
+			ActorType: ActorTypeStart + 1 + ActorType(i),
+			ActorId:   "r",
+		}
+	}
+
+	buckets := s.bucketByGroup(refs)
+	if len(buckets) != groups {
+		t.Fatalf("buckets = %d, want %d", len(buckets), groups)
+	}
+	sum := 0
+	for i, b := range buckets {
+		if len(b) == 0 {
+			continue
+		}
+		if cap(b) != len(b) {
+			t.Errorf("bucket %d: cap %d != len %d, growth allocations were not avoided", i, cap(b), len(b))
+		}
+		prev := -1
+		for _, ref := range b {
+			if got := s.getActorGroupIndex(ref); got != uint16(i) {
+				t.Errorf("ref %d landed in bucket %d but belongs to %d", ref.GetActorType(), i, got)
+			}
+			idx := int(ref.GetActorType() - (ActorTypeStart + 1))
+			if idx <= prev {
+				t.Errorf("bucket %d: input order not preserved (%d after %d)", i, idx, prev)
+			}
+			prev = idx
+		}
+		sum += len(b)
+	}
+	if sum != total {
+		t.Fatalf("total refs = %d, want %d: no recipient may be lost", sum, total)
+	}
+
+	// 单 group 边界：全部落进桶 0
+	single := NewSystem(func(sc *SystemConfig) {
+		sc.LogFunc = func(LogLevel, string, ...interface{}) {}
+	}).(*system)
+	single.actorGroups = []*actorGroup{newActorGroup(single)}
+	sb := single.bucketByGroup(refs)
+	if len(sb) != 1 || len(sb[0]) != total {
+		t.Fatalf("single group: buckets = %d, bucket0 = %d, want 1/%d", len(sb), len(sb[0]), total)
+	}
+}
+
+// 空收件人列表不得产生桶，也不得 panic。
+func TestBucketByGroupEmpty(t *testing.T) {
+	s, _ := newUnstartedSingleGroupSystem(t)
+	buckets := s.bucketByGroup(nil)
+	if len(buckets) != 1 || len(buckets[0]) != 0 {
+		t.Fatalf("buckets = %v, want one empty bucket", buckets)
+	}
+}
+
 // 未配置上限时保持旧行为（无界），避免给既有用户带来行为变化。
 func TestGroupMailboxDepthUnlimitedByDefault(t *testing.T) {
 	s, group := newUnstartedSingleGroupSystem(t)
