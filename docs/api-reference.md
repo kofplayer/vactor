@@ -17,13 +17,13 @@
 | `OuterQueueMaxDepth` | 0（不限制） | 外部 watch / 事件队列（`System.Watch` / `ListenEvent` 传入的 `*Queue[interface{}]`）深度上限；达上限后丢弃通知、记 Warn 并**摘除该订阅** |
 | `LogFunc` | stdout 打印 | 自定义日志（仅 Start 后生效；Start 前的日志走默认 stdout 实现） |
 
-> **背压是"丢弃"而不是"反压调用方"**：达到 `MaxMailboxDepth` 时 `Send` / `BatchSend` 仍返回 `nil`（停机等其他失败场景除外），失败只体现在 Error 日志里。若需要"不丢消息"，应在业务侧做确认/重试，而不是依赖背压。
+> **背压是"丢弃"而不是"反压调用方"**：`Send` 无返回值，投递失败只体现在 Error 日志里；`BatchSend` 会把失败作为 `VAError` 返回（过载 `ErrorCodeMailboxOverflow`、停机 `ErrorCodeSystemNotStarted`）。注意丢弃发生在**投递之后的 group 分派阶段**（actor mailbox 超限）时同样只记日志、不回填给调用方。若需要"不丢消息"，应在业务侧做确认/重试，而不是依赖背压。
 >
 > `MaxMailboxDepth` 覆盖两层：**actor mailbox**（单个慢消费者）与 **group mailbox**（组内全部流量的入口，信封在其中停留极短，故按 8 倍放大，避免把正常突发误判成过载）。只配前者会让人误以为已受保护。
 >
 > **`OuterQueueMaxDepth` 的摘除是永久性的**：一次溢出，该订阅就没了（这是为了防止无界增长——无界队列永不入队失败，既有的"入队失败即摘除"清理逻辑从未生效过）。请按消费者的最坏停顿时间留出余量，消费者侧应保证持续 `Dequeue`。
 
-> **⚠️ `TickInterval <= 0` 的完整后果**：tick 循环是框架做周期维护的唯一时机，关闭后不只是「不做闲置回收检查」，还会连带停掉 **异步请求超时扫描**——`RequestAsync` 指定了 timeout 也**永远不会触发超时回调**（回调永久悬挂），同时 `processingRequestCount` 无法通过超时路径归零，actor **永不回收**。仅当你的 actor 全部不需要回收、也不使用带超时的异步请求时才可关闭；否则请保留默认 1s。
+> **⚠️ `TickInterval <= 0` 的完整后果**：tick 循环是框架做周期维护的唯一时机，关闭后不只是「不做闲置回收检查」，还会连带停掉 **异步请求超时扫描**——`RequestAsync` 指定了 timeout 也**永远不会触发超时回调**（回调永久悬挂）。仅当你的 actor 全部不需要回收、也不使用带超时的异步请求时才可关闭；否则请保留默认 1s。
 >
 > 若确实想降低 tick 开销，正确做法不是关掉 tick，而是给不需要周期任务的 actor 调 `ctx.SetTickEnabled(false)`（框架仍会为有未完成异步回调、或满足回收条件的 actor 投递 tick）。
 
@@ -32,7 +32,8 @@
 | 方法 | 说明 |
 |------|------|
 | `RegisterActorType(type, creator)` | 注册 actor 类型；`type ≥ ActorTypeStart(10)`；仅 Start 前（重复注册记 Warn，新 creator 覆盖旧的） |
-| `Start()` / `Stop()` / `IsRunning()` | 启动（创建 group、ticker；双重 Start 被拒绝）/ 优雅停止（关 mailbox、等 WaitGroup；不可重启）/ 运行态。Start 前发送消息返回 `ErrorCodeSystemNotStarted` |
+| `Start()` / `Stop()` / `IsRunning()` | 启动（创建 group、ticker；双重 Start 被拒绝；**Stop 之后 Start 同样被拒绝**）/ 优雅停止（关 mailbox、等所有 group+actor goroutine 退出，**无超时上界**；不可重启）/ 运行态（已 Start 且未 Stop）。Start 前发送消息返回 `ErrorCodeSystemNotStarted` |
+| `StopWithContext(ctx) error` | 与 `Stop()` 同序，但把"等在途 handler 跑完"限制在 ctx 时限内；超时返回 `ctx.Err()` 并记 Error（含仍存活的 goroutine 数），停机在后台继续。**只要你的 handler 可能阻塞（含 `Request(..., timeout<=0)`），就应该用它而不是 `Stop()`**——否则进程可能永远退不出去 |
 | `Send(ref, msg)` | 单向消息，无返回 |
 | `Request(ref, msg, timeout) (interface{}, VAError)` | 系统外同步请求；`timeout ≤ 0` 表示无限等待——**会一直阻塞调用方 goroutine 直到目标响应**，目标不响应则永久悬挂，建议显式给时限 |
 | `Watch(ref, watchType, queue)` / `Unwatch(...)` | 系统外 watch，通知投递到 `Queue[interface{}]`（消息为 `*MsgOnWatchMsg`） |
@@ -109,4 +110,4 @@ const ActorTypeStart    ActorType = 10  // 业务类型下限
 
 ## 错误（[error.go](../error.go)）
 
-`VAError` = `error` + `Code() ErrorCode`。内置：`ErrorCodeSuccess(0)`、`ErrorCodeTimeout(1)`、`ErrorCodeInvalidActor(2)`、`ErrorCodeSystemNotStarted(3)`、`ErrorCodeHandlerPanic(4)`、`ErrorCodeSelfRequest(5)`；业务自定义从 `ErrorCodeCustomStart(100)` 起。`Error()` 返回 `VaError(code=N)`，判错应比较 `Code()`。dvactor 侧码表见 [cluster.md](../../dvactor/docs/cluster.md)。
+`VAError` = `error` + `Code() ErrorCode`。内置：`ErrorCodeSuccess(0)`、`ErrorCodeTimeout(1)`、`ErrorCodeInvalidActor(2)`、`ErrorCodeSystemNotStarted(3)`、`ErrorCodeHandlerPanic(4)`、`ErrorCodeSelfRequest(5)`、`ErrorCodeMailboxOverflow(6)`（投递因 `MaxMailboxDepth` 被丢弃；刻意与"未启动"分开——两者的处置方式完全不同）；业务自定义从 `ErrorCodeCustomStart(100)` 起。`Error()` 返回 `VaError(code=N)`，判错应比较 `Code()`。dvactor 侧码表见 [cluster.md](../../dvactor/docs/cluster.md)。

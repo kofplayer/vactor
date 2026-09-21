@@ -21,7 +21,9 @@ func main() {
 
 	system.Start()
 
-	_, err := system.Request(system.CreateActorRef(TestActorType, "1"), "hello", 0)
+	// 用有限超时：timeout<=0 是无限等待，示例不应该演示会挂死的调用方式
+	rsp, err := system.Request(system.CreateActorRef(TestActorType, "1"), "hello", time.Second)
+	_ = rsp
 	if err != nil {
 		system.LogError("request error: %v", err.Code())
 	}

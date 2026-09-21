@@ -44,7 +44,7 @@ BatchSend/Notify（多收件人）先在 LocalRouter 按 group 拆分投递，gr
 1. **激活**：group 处理信封时发现 actor 无 context → 创建 → goroutine 启动 → 先收到 `MsgOnStart`。
 2. **运行**：每收到一条非 tick 消息刷新 `latestMsgTime`。
 3. **Tick**：System 的 ticker（默认 1s）向每个 group mailbox 投一个 `envelopeTick`，group 逐个 actor 判定后再扇出。actor 处理 tick 时检查：
-   - **回收需同时满足 5 个条件**：本条 tick 是**本批最后一条消息**（`n == len(msgs)-1`）、`processingRequestCount <= 0`、无待处理异步回调、`stopInterval > 0`、且闲置已超时（`latestMsgTime + stopInterval < now`）→ goroutine 退出（回收）。
+   - **回收需同时满足 5 个条件**：本条 tick 是**本批最后一条消息**（`n == len(msgs)-1`）、`processingRequestCount <= 0`、无待处理异步回调、`stopInterval > 0`、且闲置已超时（`latestMsgTime + stopInterval < now`）→ goroutine 退出（回收）。注意第 2 条目前没有上界：一条从未被应答的请求会让该 actor 永久不被回收（已知未修，见 [internals.md](internals.md)）。
    - 同时处理超时的 RequestAsync 回调（回调收到 `ErrorCodeTimeout`）。
    - 否则向 actor 投递 `MsgOnTick`（可在 actor 内做周期任务，如示例中用 `ctx.Notify` 推 watch）。
 

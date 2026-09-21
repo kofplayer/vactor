@@ -16,7 +16,7 @@ func main() {
 		return func(ctx vactor.EnvelopeContext) {
 			switch m := ctx.GetMessage().(type) {
 			case string:
-				ctx.Response("rsponse for "+m, nil)
+				ctx.Response("response for "+m, nil)
 			}
 		}
 	})
@@ -27,8 +27,14 @@ func main() {
 		return func(ctx vactor.EnvelopeContext) {
 			switch ctx.GetMessage().(type) {
 			case *vactor.MsgOnStart:
-				// inner sync request
-				ctx.RequestAsync(responser, "req async", 0, func(msg interface{}, err vactor.VAError) {
+				// inner async request
+				// 三处 timeout 一律给有限值：timeout<=0 是无限等待，目标不响应时
+				// 同步版会永久挂死本 actor、异步版的回调则永久悬挂（见 docs/api-reference.md）
+				ctx.RequestAsync(responser, "req async", time.Second, func(msg interface{}, err vactor.VAError) {
+					if err != nil {
+						ctx.LogDebug("async error: %v", err)
+						return
+					}
 					switch rsp := msg.(type) {
 					case string:
 						ctx.LogDebug("async receive %#v\n", rsp)
@@ -37,8 +43,12 @@ func main() {
 					}
 				})
 
-				// inner async request
-				msg, _ := ctx.Request(responser, "req sync", 0)
+				// inner sync request：阻塞本 actor goroutine，务必带超时
+				msg, err := ctx.Request(responser, "req sync", time.Second)
+				if err != nil {
+					ctx.LogDebug("sync error: %v", err)
+					return
+				}
 				switch rsp := msg.(type) {
 				case string:
 					ctx.LogDebug("sync receive %#v\n", rsp)
@@ -53,7 +63,7 @@ func main() {
 	system.Send(system.CreateActorRef(RequesterType, "1"), "hello")
 
 	// outer request
-	rsp, err := system.Request(responser, "req outer", 0)
+	rsp, err := system.Request(responser, "req outer", time.Second)
 	if err != nil {
 		system.LogDebug("request error: %v\n", err)
 	} else {
