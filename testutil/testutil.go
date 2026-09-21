@@ -48,6 +48,20 @@ func (b *LogBuffer) Logs() []string {
 	return append([]string(nil), b.lines...)
 }
 
+// CountContaining 统计包含 substr 的日志行数。用于断言"某事没有再发生"
+// （比较前后计数），而 Contains 只能证明"发生过"。
+func (b *LogBuffer) CountContaining(substr string) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n := 0
+	for _, line := range b.lines {
+		if strings.Contains(line, substr) {
+			n++
+		}
+	}
+	return n
+}
+
 // Contains 判断是否存在包含 substr 的日志行。
 func (b *LogBuffer) Contains(substr string) bool {
 	b.mu.Lock()
@@ -78,6 +92,9 @@ func (ts *TestSystem) Logs() []string { return ts.logs.Logs() }
 
 // LogContains 判断是否出现过包含 substr 的日志行。
 func (ts *TestSystem) LogContains(substr string) bool { return ts.logs.Contains(substr) }
+
+// CountContaining 返回包含 substr 的日志行数。
+func (ts *TestSystem) CountContaining(substr string) int { return ts.logs.CountContaining(substr) }
 
 // DumpLogs 把日志逐行写入测试输出（失败排查用）。
 func (ts *TestSystem) DumpLogs(t *testing.T) {

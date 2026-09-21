@@ -599,6 +599,12 @@ func (a *actorContext) processBatch(msgs []Envelope) (stop bool) {
 			a.touch(time.Now())
 			continue
 		case *EnvelopeNotify:
+			if t.Message == nil {
+				// 信封是导出类型，手工构造/远端解码都可能给出没有载荷的通知。
+				// 在这里挡住，而不是靠整批 recover——后者会连带丢掉本批其余消息。
+				a.system.LogError("actor %v receive notify without payload, dropped", a.actorRef)
+				continue
+			}
 			switch t.NotifyType {
 			case NotifyTypeWatch:
 				c = &envelopeContextNotify{

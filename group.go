@@ -95,7 +95,13 @@ func (m *actorGroup) processEnvelope(toActorRef ActorRef, envelopes Envelope) {
 		return
 	}
 	if toActorRef.GetSystemId() != m.system.systemId {
-		m.system.LogPanic("actor key system %v not fit, need %v", toActorRef.GetSystemId(), m.system.systemId)
+		// 刻意不用 LogPanic：panic 会被本批的整批 recover 捕获，连带丢掉**同一批里所有
+		// 无关信封**。单机下这种引用来自编程错误，但分布式层（dvactor）的目标引用是从
+		// 远端字节流解出来的——一条畸形包就能毒死本组当前一整批消息。
+		// 丢当前信封 + Error 日志，故障面收敛到这一条。
+		m.system.LogError("actor %v target system %v != local system %v, envelope dropped",
+			toActorRef, toActorRef.GetSystemId(), m.system.systemId)
+		return
 	}
 	actorRefImpl, isImpl := toActorRef.(*ActorRefImpl)
 	if !isImpl {
@@ -160,13 +166,17 @@ func (m *actorGroup) processEnvelope(toActorRef ActorRef, envelopes Envelope) {
 	}
 	// 背压：慢消费者会让 mailbox 无界增长。达到上限直接丢弃并告警，
 	// 而不是把内存吃满（0 表示不限制，保持旧行为）。
-	if depth := actorMailbox.Len(); m.system.maxMailboxDepth > 0 && depth >= m.system.maxMailboxDepth {
-		m.system.LogError("actor %v mailbox depth %d reached limit %d, message dropped",
-			toActorRef, depth, m.system.maxMailboxDepth)
-		return
-	} else if m.system.mailboxHighWaterMark > 0 && depth >= m.system.mailboxHighWaterMark {
-		m.system.LogWarn("actor %v mailbox depth %d exceeds high water mark %d",
-			toActorRef, depth, m.system.mailboxHighWaterMark)
+	// 两个开关都没配时不取 Len()——它要加锁，实测 18~25ns/次，而默认配置下这两项
+	// 都是关的（与 enqueueGroup 同一处理，别在每条消息上白付一次锁）。
+	if m.system.maxMailboxDepth > 0 || m.system.mailboxHighWaterMark > 0 {
+		if depth := actorMailbox.Len(); m.system.maxMailboxDepth > 0 && depth >= m.system.maxMailboxDepth {
+			m.system.LogError("actor %v mailbox depth %d reached limit %d, message dropped",
+				toActorRef, depth, m.system.maxMailboxDepth)
+			return
+		} else if m.system.mailboxHighWaterMark > 0 && depth >= m.system.mailboxHighWaterMark {
+			m.system.LogWarn("actor %v mailbox depth %d exceeds high water mark %d",
+				toActorRef, depth, m.system.mailboxHighWaterMark)
+		}
 	}
 	// 这里只关心 actor 是否已存在：已存在则直接投递，不存在才新建 context。
 	if _, exists := m.actorContexts[*actorRefImpl]; !exists {
@@ -214,6 +224,11 @@ func (m *actorGroup) onActorStoped(actorRef ActorRef) {
 		}
 	}
 
+	// 闲置订阅缓存**不做任何过期淘汰**：这里存的是"谁在 watch 这个 actor"，属于权威
+	// 状态而不是可重建的缓存。丢掉它的后果是双向静默的——订阅方没收到任何 Unwatch、
+	// 仍以为订着，被观察方复活后 Notify 却找不到人，表现为"通知莫名其妙断了"。
+	// 内存代价（随"曾被订阅过的 actorId 数"增长）是"actor 逻辑上永远存在"这一模型
+	// 的既定部分。真要加界，前提是先给订阅方一条"订阅已失效"的通知路径。
 	if cache != nil {
 		m.actorCaches[*actorRefImpl] = cache
 	}

@@ -19,6 +19,10 @@ const (
 	// 请求信封进的是 mailbox，而本 actor 正阻塞在等待响应上，处理不到它。
 	// 框架直接返回本错误而不是让调用方干等到超时（timeout<=0 时更是永久挂死）。
 	ErrorCodeSelfRequest ErrorCode = 5
+	// ErrorCodeMailboxOverflow 投递因 mailbox 达到 MaxMailboxDepth 而被丢弃。
+	// 与 ErrorCodeSystemNotStarted 分开：两者的处置方式完全不同——前者要扩容/提速
+	// 消费者或调大上限，后者是生命周期用法问题。混用一个码会让调用方误判。
+	ErrorCodeMailboxOverflow ErrorCode = 6
 	// ErrorCodeCustomStart 用户自定义错误码起点。
 	ErrorCodeCustomStart ErrorCode = 100
 )

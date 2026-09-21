@@ -486,3 +486,41 @@ func TestActorSyncRequestUnboundedWait(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+// 外层同步响应用的是非阻塞写。调用方复用同一条 RspChan（EnvelopeOuterRequest 是
+// 导出类型、通道由调用方提供）时，第二条响应无处可放：阻塞写会把 actor goroutine
+// 永久卡住（整个 actor 从此既不处理消息也不被回收），非阻塞写只丢一条响应并留日志。
+func TestOuterRequestResponseDoesNotBlockActorWhenChannelFull(t *testing.T) {
+	var handled atomic.Int32
+	ts := testutil.NewSystem(t, func(s vactor.System) {
+		s.RegisterActorType(100, func() vactor.Actor {
+			return func(ctx vactor.EnvelopeContext) {
+				switch ctx.GetMessage().(type) {
+				case string:
+					handled.Add(1)
+					ctx.Response("ok", nil)
+				}
+			}
+		})
+	}, testutil.WithGroupCount(1))
+
+	shared := make(chan *vactor.Response, 1)
+	target := ts.CreateActorRef(100, "a")
+	// 两条共用同一通道的请求：第一条占住缓冲，第二条必须走丢弃分支
+	_ = ts.LocalRouter(&vactor.EnvelopeOuterRequest{ToActorRef: target, Message: "one", RspChan: shared})
+	_ = ts.LocalRouter(&vactor.EnvelopeOuterRequest{ToActorRef: target, Message: "two", RspChan: shared})
+
+	// actor 必须还活着并能继续处理后续消息
+	ts.Send(target, "three")
+	testutil.WaitFor(t, 3*time.Second, "actor still processing after a dropped response", func() bool {
+		return handled.Load() >= 3
+	})
+	if !ts.LogContains("caller channel is full") {
+		t.Fatal("the dropped outer response must be logged")
+	}
+	// 通道里留下的必须是第一条，而不是被第二条覆盖
+	first := <-shared
+	if first.Message != "ok" {
+		t.Fatalf("buffered response = %v", first)
+	}
+}

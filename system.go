@@ -1,6 +1,7 @@
 package vactor
 
 import (
+	"context"
 	"fmt"
 	"runtime"
 	"sync"
@@ -19,8 +20,15 @@ type System interface {
 	// Start initializes and starts the actor system.
 	Start()
 
-	// Stop gracefully stops the actor system.
+	// Stop gracefully stops the actor system and waits for every group/actor
+	// goroutine to finish. It blocks indefinitely if a user handler is stuck;
+	// use StopWithContext when a bounded shutdown is required.
 	Stop()
+
+	// StopWithContext stops the system like Stop but bounds the wait by ctx.
+	// It returns ctx.Err() when the deadline expires first; shutdown keeps
+	// running in the background and the system must not be used afterwards.
+	StopWithContext(ctx context.Context) error
 
 	// IsRunning checks if the actor system is currently running.
 	// Returns: true if the system is running, false otherwise.
@@ -169,6 +177,12 @@ func NewSystem(cfgFuncs ...SystemConfigFunc) System {
 		},
 	}
 	s.createActorRefExFunc = s.defaultCreateActorRefEx
+	// 用户给了 LogFunc 就立刻生效：Start 之前也会有配置类拒绝（RegisterActorType
+	// 类型非法、重复 Start、Stop 后重启……），早先这些只写在 Start 里装载，结果
+	// 全部绕过用户 logger 直接 printf 到 stdout，测试与生产都捕获不到。
+	if config.LogFunc != nil {
+		s.logFunc = config.LogFunc
+	}
 	return s
 }
 
@@ -227,6 +241,12 @@ func (s *system) SetRouter(router Router) {
 }
 
 func (s *system) Start() {
+	// Stop 之后不可重启：停机已经关掉了 mailbox/ticker，重建会让"已停止的系统"
+	// 又跑起来，而 IsRunning 与调用方的认知全部反过来。要用就新建一个 System。
+	if s.stopped.Load() {
+		s.LogError("system already stopped and cannot be restarted; create a new System")
+		return
+	}
 	if !s.started.CompareAndSwap(false, true) {
 		s.LogError("system already started, ignore duplicate Start")
 		return
@@ -300,15 +320,23 @@ func (s *system) getActorGroup(actorRef ActorRef) *actorGroup {
 }
 
 // bucketByGroup 把收件人按所属 group 分桶，返回的切片下标即 group 下标（空桶为 nil）。
+// 第二个返回值是**被跳过的 nil 引用个数**：批量投递的收件人列表可能来自远端字节流
+// （dvactor 的 clusterNet.OnMessage 不经 System.BatchSend 的 nil 过滤），这里统一滤掉，
+// 调用方只负责记日志。
 //
 // 两趟分配：先计数，再按精确容量一次性分配。若单趟 append 到 nil 切片，每个桶都会
 // 经历 1,2,4,...,N 的倍增——1000 个收件人摊到 4 个 group 就是约 36 次分配；这里
 // 只分配 2 个定长切片 + 非空桶各一次。顺带把投递顺序从"map 遍历"变成"按 group
 // 下标"，不再依赖 map 的随机顺序。
-func (s *system) bucketByGroup(refs []ActorRef) [][]ActorRef {
+func (s *system) bucketByGroup(refs []ActorRef) ([][]ActorRef, int) {
 	n := len(s.actorGroups)
 	counts := make([]int, n)
+	skipped := 0
 	for _, ref := range refs {
+		if ref == nil {
+			skipped++
+			continue
+		}
 		counts[s.getActorGroupIndex(ref)]++
 	}
 	buckets := make([][]ActorRef, n)
@@ -318,10 +346,21 @@ func (s *system) bucketByGroup(refs []ActorRef) [][]ActorRef {
 		}
 	}
 	for _, ref := range refs {
+		if ref == nil {
+			continue
+		}
 		i := s.getActorGroupIndex(ref)
 		buckets[i] = append(buckets[i], ref)
 	}
-	return buckets
+	return buckets, skipped
+}
+
+// logSkippedNilRefs 记录被 bucketByGroup 滤掉的 nil 收件人。单独成函数是为了让
+// 分桶本身保持无副作用（它在热路径上被每条批量信封调用）。
+func (s *system) logSkippedNilRefs(skipped int) {
+	if skipped > 0 {
+		s.LogError("batch envelope has %d nil target actor ref(s), skipped", skipped)
+	}
 }
 
 func (s *system) BatchSend(actorRefs []ActorRef, messages []interface{}) VAError {
@@ -377,26 +416,44 @@ func (s *system) groupMailboxHighWater() int {
 	return s.mailboxHighWaterMark * GroupMailboxDepthFactor
 }
 
-// enqueueGroup 向 group mailbox 投递，返回 false 表示被丢弃（超限或 mailbox 已关闭）。
+// dropReason 说明一次投递失败的原因。
+type dropReason uint8
+
+const (
+	dropNone dropReason = iota
+	dropClosed
+	dropOverflow
+	// dropInvalid：信封本身不可投递（缺少目标）。不属于停机也不属于过载，
+	// 与 dvactor Router 对同一情形返回 ErrorCodeInvalidActor 保持一致。
+	dropInvalid
+)
+
+// enqueueGroup 向 group mailbox 投递，返回 dropNone 表示成功；否则给出丢弃原因。
 // group mailbox 是所有进入该组消息的入口，若无上限，突发流量或分派能力不足会让它
 // 无界增长直至 OOM——MaxMailboxDepth 只保护 actor mailbox 是不够的。
-func (s *system) enqueueGroup(group *actorGroup, envelope Envelope) bool {
+func (s *system) enqueueGroup(group *actorGroup, envelope Envelope) dropReason {
 	limit := s.groupMailboxDepthLimit()
 	mark := s.groupMailboxHighWater()
 	if limit <= 0 && mark <= 0 {
 		// 两项都没配：不额外取一次 Len()（它要加锁），保持原路径开销
-		return group.mailbox.Enqueue(envelope)
+		if group.mailbox.Enqueue(envelope) {
+			return dropNone
+		}
+		return dropClosed
 	}
 	// 丢弃与告警是两件独立的事：只配水位不配上限时也必须能告警
 	depth := group.mailbox.Len()
 	if limit > 0 && depth >= limit {
 		s.LogError("actor group mailbox depth %d reached limit %d, message dropped", depth, limit)
-		return false
+		return dropOverflow
 	}
 	if mark > 0 && depth >= mark {
 		s.LogWarn("actor group mailbox depth %d exceeds high water mark %d", depth, mark)
 	}
-	return group.mailbox.Enqueue(envelope)
+	if group.mailbox.Enqueue(envelope) {
+		return dropNone
+	}
+	return dropClosed
 }
 
 // LocalRouter 本地投递。mailbox 已关闭（系统停机中或已停止）时返回错误：
@@ -405,50 +462,64 @@ func (s *system) LocalRouter(envelope Envelope) VAError {
 	if len(s.actorGroups) == 0 {
 		return NewVAError(ErrorCodeSystemNotStarted)
 	}
-	dropped := false
+	overflowed := false
+	closed := false
+	invalid := false
+	report := func(r dropReason) {
+		switch r {
+		case dropOverflow:
+			overflowed = true
+		case dropClosed:
+			closed = true
+		case dropInvalid:
+			invalid = true
+		}
+	}
 	switch e := envelope.(type) {
 	case *EnvelopeBatchSend:
-		for i, actorRefs := range s.bucketByGroup(e.ToActorRefs) {
+		buckets, skipped := s.bucketByGroup(e.ToActorRefs)
+		s.logSkippedNilRefs(skipped)
+		for i, actorRefs := range buckets {
 			if len(actorRefs) == 0 {
 				continue
 			}
-			if !s.enqueueGroup(s.actorGroups[i], &EnvelopeBatchSend{
+			report(s.enqueueGroup(s.actorGroups[i], &EnvelopeBatchSend{
 				FromActorRef: e.FromActorRef,
 				ToActorRefs:  actorRefs,
 				Messages:     e.Messages,
-			}) {
-				dropped = true
-			}
+			}))
 		}
 	case *EnvelopeNotify:
-		for i, actorRefs := range s.bucketByGroup(e.ToActorRefs) {
+		buckets, skipped := s.bucketByGroup(e.ToActorRefs)
+		s.logSkippedNilRefs(skipped)
+		for i, actorRefs := range buckets {
 			if len(actorRefs) == 0 {
 				continue
 			}
-			if !s.enqueueGroup(s.actorGroups[i], &EnvelopeNotify{
+			report(s.enqueueGroup(s.actorGroups[i], &EnvelopeNotify{
 				FromActorRef: e.FromActorRef,
 				ToActorRefs:  actorRefs,
 				NotifyType:   e.NotifyType,
 				Message:      e.Message,
-			}) {
-				dropped = true
-			}
+			}))
 		}
 	default:
 		toActorRef := envelope.GetToActorRef()
 		if toActorRef == nil {
 			// 缺少目标的信封（畸形跨节点包 / 调用方漏填）：丢弃而不是解引用 panic
 			s.LogError("local router received envelope with nil target actor, dropped")
-			dropped = true
+			invalid = true
 			break
 		}
-		group := s.getActorGroup(toActorRef)
-		if !s.enqueueGroup(group, envelope) {
-			dropped = true
-		}
+		report(s.enqueueGroup(s.getActorGroup(toActorRef), envelope))
 	}
-	if dropped {
+	switch {
+	case closed:
 		return NewVAError(ErrorCodeSystemNotStarted)
+	case overflowed:
+		return NewVAError(ErrorCodeMailboxOverflow)
+	case invalid:
+		return NewVAError(ErrorCodeInvalidActor)
 	}
 	return nil
 }
@@ -548,8 +619,11 @@ func (s *system) SetCreateActorRefExFunc(createActorRefExFunc CreateActorRefExFu
 	s.createActorRefExFunc = createActorRefExFunc
 }
 
+// IsRunning 反映"已 Start 且未 Stop"。刻意只读两个原子标志：早先它用
+// `config == nil` 推断运行态，那是个被 Start 置空的普通字段，既与其它 goroutine
+// 的读取构成竞争，又在"未 Start 就 Stop"时给出与事实相反的答案。
 func (s *system) IsRunning() bool {
-	return s.config == nil && !s.stopped.Load()
+	return s.started.Load() && !s.stopped.Load()
 }
 
 func (s *system) defaultCreateActorRefEx(systemId SystemId, actorType ActorType, actorId ActorId) ActorRef {
@@ -569,9 +643,25 @@ func (s *system) defaultCreateActorRefEx(systemId SystemId, actorType ActorType,
 	}
 }
 
+// Stop 停机并无限等待收尾完成。
 func (s *system) Stop() {
+	_ = s.StopWithContext(context.Background())
+}
+
+// StopWithContext 停机，并把"等所有 goroutine 退出"限制在 ctx 的时限内。
+//
+// 为什么需要它：Stop 的语义是"关掉入口、把在途消息处理完"，而最后一个环节的
+// `wg.Wait()` 没有任何上界——只要有一个用户 handler 卡住（`ctx.Request(..., 0)`
+// 等一个不会来的响应、或 handler 里做阻塞 IO），Stop 就永久挂住，优雅停机变成
+// 整个进程退不出去（上一轮检查里就真实发生过一次：测试包被拖到 go test 超时）。
+//
+// 超时返回时停机流程仍在后台继续（group mailbox 已关闭，goroutine 会陆续退出），
+// 但调用方不应再使用该 System。返回的错误里带上仍存活的 goroutine 数：它是定位
+// "谁还没退"的第一条线索（本方法刻意不去枚举各 group 的 actor 表——那张表只属于
+// 对应 group goroutine，跨 goroutine 读会构成数据竞争）。
+func (s *system) StopWithContext(ctx context.Context) error {
 	if !s.stopped.CompareAndSwap(false, true) {
-		return
+		return nil // 幂等：重复调用直接视为已停完
 	}
 	if s.ticker != nil {
 		s.ticker.Stop()
@@ -582,7 +672,21 @@ func (s *system) Stop() {
 	for i := range s.actorGroups {
 		s.actorGroups[i].mailbox.Close()
 	}
-	s.wg.Wait()
+
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		s.LogError("stop did not finish in time (%v), %d goroutine(s) still running; "+
+			"shutdown continues in the background but this system must not be used",
+			ctx.Err(), runtime.NumGoroutine())
+		return ctx.Err()
+	}
 }
 
 func (s *system) LogDebug(format string, args ...interface{}) {

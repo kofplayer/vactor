@@ -278,9 +278,16 @@ func (a *envelopeContextOuterRequest) Response(msg interface{}, err VAError) {
 		return
 	}
 	a.doSendRsp = true
-	a.rspChan <- &Response{
+	// 非阻塞写：调用方可能早已按自己的超时返回（System.Request 超时后不再有人读
+	// 这条通道）。阻塞写会把"契约被破坏"升级成"永久卡死 actor goroutine"，而非
+	// 阻塞写只丢一条响应并留下一行可排查的日志——与 dvactor RequestProxy 同一取舍。
+	select {
+	case a.rspChan <- &Response{
 		Message: msg,
 		Error:   err,
+	}:
+	default:
+		a.LogError("outer request response dropped: caller channel is full or gone, actor %v", a.actorRef)
 	}
 }
 

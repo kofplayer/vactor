@@ -136,40 +136,95 @@ func TestContextLogPanicRecovered(t *testing.T) {
 	col.WaitForMessages(t, 1, 2*time.Second, "actor alive after ctx.LogPanic")
 }
 
-// 向异 SystemId 的引用发消息（原 LogPanic 崩溃路径）：group 批量 recover 兜底，
-// 进程与 group 均存活。
+// 向异 SystemId 的引用发消息：只丢这一条并记日志，进程与 group 存活。
+// 原实现是 LogPanic + 整批 recover——故障面是"本组当前一整批消息"，而分布式层
+// （dvactor）的目标引用来自远端字节流，一条畸形包就能毒死一整批无关消息。
 func TestForeignSystemRefDoesNotKillGroup(t *testing.T) {
 	col := &testutil.Collector{}
 	ts := testutil.NewSystem(t, func(s vactor.System) {
 		s.RegisterActorType(100, col.Creator())
-	})
+	}, testutil.WithGroupCount(1))
 	badRef := &vactor.ActorRefImpl{SystemId: 9, ActorType: 100, ActorId: "x", GroupSlot: 1}
 	_ = ts.LocalRouter(&vactor.EnvelopeSend{FromActorRef: nil, ToActorRef: badRef, Message: "poison"})
-	time.Sleep(100 * time.Millisecond)
-	if !ts.LogContains("actor group process envelope panic") {
-		t.Fatal("expected group panic log")
+	testutil.WaitFor(t, 2*time.Second, "poisoned envelope logged", func() bool {
+		return ts.LogContains("envelope dropped")
+	})
+	if ts.LogContains("process envelope panic") {
+		t.Fatal("foreign SystemId must not escalate to a batch-level panic")
 	}
 	ts.Send(ts.CreateActorRef(100, "ok"), "fine")
 	col.WaitForMessages(t, 1, 2*time.Second, "group alive after poisoned envelope")
 }
 
-// 非法 EnvelopeNotify（Event 通知缺 Message，原 nil 解引用崩溃路径）：recover 兜底。
+// 投毒信封排在批量投递最前时，同批其余收件人一条都不能少。
+// 这是 group 整批 recover 的放大路径：不逐条隔离就会 4 次投递全丢。
+func TestForeignSystemRefInBatchDoesNotCostOthers(t *testing.T) {
+	col := &testutil.Collector{}
+	ts := testutil.NewSystem(t, func(s vactor.System) {
+		s.RegisterActorType(100, col.Creator())
+	}, testutil.WithGroupCount(1))
+	bad := &vactor.ActorRefImpl{SystemId: 999, ActorType: 100, ActorId: "bad", GroupSlot: 1}
+	ok1 := ts.CreateActorRef(100, "g1")
+	ok2 := ts.CreateActorRef(100, "g2")
+	// 单 group：三个引用落进同一个桶，由同一个批处理循环投递
+	if err := ts.BatchSend([]vactor.ActorRef{bad, ok1, ok2}, []interface{}{"m1", "m2"}); err != nil {
+		t.Fatalf("BatchSend: %v", err)
+	}
+	msgs := col.WaitForMessages(t, 4, 2*time.Second, "both good recipients get both messages")
+	for _, m := range msgs {
+		if s, _ := m.(string); s != "m1" && s != "m2" {
+			t.Fatalf("unexpected message %v", m)
+		}
+	}
+}
+
+// 批内含 nil 收件人（远端解码出的空 ActorRef）：滤掉并记日志，其余照常投递，
+// 且不得在调用方 goroutine panic——该路径可能来自没有 recover 的网络读 goroutine。
+func TestBatchSendWithNilRefIsFiltered(t *testing.T) {
+	col := &testutil.Collector{}
+	ts := testutil.NewSystem(t, func(s vactor.System) {
+		s.RegisterActorType(100, col.Creator())
+	}, testutil.WithGroupCount(1))
+	a := ts.CreateActorRef(100, "a")
+	b := ts.CreateActorRef(100, "b")
+	if err := ts.BatchSend([]vactor.ActorRef{nil, a, nil, b}, []interface{}{"m1"}); err != nil {
+		t.Fatalf("BatchSend: %v", err)
+	}
+	col.WaitForMessages(t, 2, 2*time.Second, "both valid recipients still get the message")
+
+	// 绕过公开 API 直达路由层（dvactor 的 clusterNet.OnMessage 就是这么调的）
+	_ = ts.LocalRouter(&vactor.EnvelopeBatchSend{
+		ToActorRefs: []vactor.ActorRef{nil},
+		Messages:    []interface{}{"x"},
+	})
+	testutil.WaitFor(t, 2*time.Second, "nil refs logged by local router", func() bool {
+		return ts.LogContains("nil target actor ref")
+	})
+}
+
+// 非法 EnvelopeNotify（Event 通知缺 Message）：逐条丢弃并记日志，
+// 不再依赖整批 recover 兜底（那会连带丢掉本批其余消息）。
 func TestMalformedNotifyDoesNotKillActor(t *testing.T) {
 	col := &testutil.Collector{}
 	ts := testutil.NewSystem(t, func(s vactor.System) {
 		s.RegisterActorType(100, col.Creator())
-	})
+	}, testutil.WithGroupCount(1))
+	target := ts.CreateActorRef(100, "a")
 	_ = ts.LocalRouter(&vactor.EnvelopeNotify{
 		FromActorRef: nil,
-		ToActorRefs:  []vactor.ActorRef{ts.CreateActorRef(100, "a")},
+		ToActorRefs:  []vactor.ActorRef{target},
 		NotifyType:   vactor.NotifyTypeEvent,
 		Message:      nil,
 	})
+	// 同一批里紧跟一条正常消息：畸形信封不能让它一起消失
+	ts.Send(target, "still-alive")
 	testutil.WaitFor(t, 2*time.Second, "malformed notify logged", func() bool {
-		return ts.LogContains("process batch panic")
+		return ts.LogContains("notify without payload")
 	})
-	ts.Send(ts.CreateActorRef(100, "a"), "still-alive")
-	col.WaitForMessages(t, 1, 2*time.Second, "actor alive after malformed notify")
+	if ts.LogContains("process batch panic") {
+		t.Fatal("malformed notify must be handled per-envelope, not by batch recover")
+	}
+	col.WaitForMessages(t, 1, 2*time.Second, "actor alive and still receiving after malformed notify")
 }
 
 // VAError 错误信息带错误码，便于排障。
@@ -305,5 +360,113 @@ func TestWatchFromUnsupportedActorRefIgnored(t *testing.T) {
 	})
 	if !ts.IsRunning() {
 		t.Fatal("system should survive unsupported watcher refs")
+	}
+}
+
+// Stop 之后不可重启：停机关掉了 mailbox 与 ticker，重启会得到一个"IsRunning 说没在
+// 跑、实际却在收发消息"的系统（本轮检查实测到过），因此 Start 必须拒绝。
+func TestStopBeforeStartCannotRestart(t *testing.T) {
+	logs := testutil.NewLogBuffer()
+	s := vactor.NewSystem(func(sc *vactor.SystemConfig) {
+		sc.GroupCount = 1
+		sc.LogFunc = logs.LogFunc
+	})
+	s.Stop() // 未 Start 就先停
+	s.Start()
+	defer s.Stop()
+
+	if s.IsRunning() {
+		t.Fatal("IsRunning must stay false: Start was rejected after Stop")
+	}
+	if !logs.Contains("cannot be restarted") {
+		t.Fatal("the rejected restart must be logged")
+	}
+	// 而且系统确实不可用：发消息按"未启动"报错，而不是静默接受
+	s.Send(s.CreateActorRef(100, "a"), "x")
+	if _, err := s.Request(s.CreateActorRef(100, "a"), "x", 200*time.Millisecond); err == nil {
+		t.Fatal("sending to a stopped system must fail")
+	}
+}
+
+// 正常路径：Start 之后 IsRunning 为真，Stop 之后为假。
+func TestIsRunningTracksStartAndStop(t *testing.T) {
+	s := vactor.NewSystem(func(sc *vactor.SystemConfig) {
+		sc.GroupCount = 1
+		sc.LogFunc = func(vactor.LogLevel, string, ...interface{}) {}
+	})
+	if s.IsRunning() {
+		t.Fatal("not started yet, must report false")
+	}
+	s.Start()
+	if !s.IsRunning() {
+		t.Fatal("IsRunning must be true after Start")
+	}
+	s.Stop()
+	if s.IsRunning() {
+		t.Fatal("IsRunning must be false after Stop")
+	}
+}
+
+// System.LogPanic 仍是公开 API（记日志后 panic）；调用方自行决定是否兜底。
+func TestSystemLogPanicPanicsAfterLogging(t *testing.T) {
+	logs := testutil.NewLogBuffer()
+	s := vactor.NewSystem(func(sc *vactor.SystemConfig) { sc.LogFunc = logs.LogFunc })
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("LogPanic must panic")
+		}
+		if !logs.Contains("boom") {
+			t.Fatal("LogPanic must log before panicking")
+		}
+	}()
+	s.LogPanic("boom %d", 1)
+}
+
+// 订阅缓存**永不淘汰**——这是框架契约，不是可以被"优化"掉的内存泄漏。
+//
+// group.actorCaches 存的是"谁在 watch 这个 actor"，属于权威状态：丢掉它不会让任何
+// 一边观察到错误——订阅方没收到 Unwatch、仍以为订着，被观察方复活后 Notify 却找不到
+// 人，表现为"通知莫名其妙断了"。所以闲置多久都必须还在（本用例故意跨几十个回收周期）。
+// 事件总线的同一契约见 TestEventHubRecyclePreservesListeners。
+func TestWatchSubscriptionSurvivesLongIdle(t *testing.T) {
+	const stopInterval = 50 * time.Millisecond
+	notify := make(chan *vactor.MsgOnWatchMsg, 8)
+
+	ts := testutil.NewSystem(t, func(s vactor.System) {
+		s.RegisterActorType(100, func() vactor.Actor {
+			return func(ctx vactor.EnvelopeContext) {
+				if m, ok := ctx.GetMessage().(string); ok && m == "ping" {
+					ctx.Notify(7, "n")
+				}
+			}
+		})
+		s.RegisterActorType(101, func() vactor.Actor {
+			return func(ctx vactor.EnvelopeContext) {
+				switch m := ctx.GetMessage().(type) {
+				case string:
+					ctx.Watch(ctx.CreateActorRef(100, "watched"), 7)
+				case *vactor.MsgOnWatchMsg:
+					notify <- m
+				}
+			}
+		})
+	}, testutil.WithGroupCount(1), testutil.WithStopInterval(stopInterval))
+
+	target := ts.CreateActorRef(100, "watched")
+	ts.Send(ts.CreateActorRef(101, "watcher"), "watch")
+	time.Sleep(100 * time.Millisecond)
+
+	ts.Send(target, "ping")
+	if m := testutil.WaitChan(t, notify, 2*time.Second, "notify before recycling"); m.Message != "n" {
+		t.Fatalf("first notify = %v", m.Message)
+	}
+
+	// 让被观察者远过回收窗口：几十个 stopInterval，任何"合理 TTL"都会被击穿
+	time.Sleep(40 * stopInterval)
+
+	ts.Send(target, "ping")
+	if m := testutil.WaitChan(t, notify, 2*time.Second,
+		"notify after the watched actor has been idle for 40 stop intervals"); m.Message != "n" {
+		t.Fatalf("notify after long idle = %v", m.Message)
 	}
 }

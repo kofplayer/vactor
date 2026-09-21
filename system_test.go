@@ -475,7 +475,10 @@ func TestBucketByGroup(t *testing.T) {
 		}
 	}
 
-	buckets := s.bucketByGroup(refs)
+	buckets, skipped := s.bucketByGroup(refs)
+	if skipped != 0 {
+		t.Fatalf("skipped = %d, want 0 (no nil ref in input)", skipped)
+	}
 	if len(buckets) != groups {
 		t.Fatalf("buckets = %d, want %d", len(buckets), groups)
 	}
@@ -509,16 +512,56 @@ func TestBucketByGroup(t *testing.T) {
 		sc.LogFunc = func(LogLevel, string, ...interface{}) {}
 	}).(*system)
 	single.actorGroups = []*actorGroup{newActorGroup(single)}
-	sb := single.bucketByGroup(refs)
+	sb, sbSkipped := single.bucketByGroup(refs)
+	if sbSkipped != 0 {
+		t.Fatalf("single group skipped = %d, want 0", sbSkipped)
+	}
 	if len(sb) != 1 || len(sb[0]) != total {
 		t.Fatalf("single group: buckets = %d, bucket0 = %d, want 1/%d", len(sb), len(sb[0]), total)
+	}
+}
+
+// nil 收件人（远端字节流解出的空 ActorRef、或调用方漏填）必须被滤掉而不是解引用
+// panic：分桶发生在投递方 goroutine（可能是网络读 goroutine，那里没有 recover）。
+func TestBucketByGroupSkipsNilRefs(t *testing.T) {
+	const groups = 4
+	s := NewSystem(func(sc *SystemConfig) {
+		sc.LogFunc = func(LogLevel, string, ...interface{}) {}
+	}).(*system)
+	s.actorGroups = make([]*actorGroup, groups)
+	for i := range s.actorGroups {
+		s.actorGroups[i] = newActorGroup(s)
+	}
+	good := func(slot GroupSlot) ActorRef {
+		return &ActorRefImpl{GroupSlot: slot, ActorType: ActorTypeStart + 1, ActorId: "g"}
+	}
+	refs := []ActorRef{good(1), nil, good(2), nil, nil, good(3)}
+
+	buckets, skipped := s.bucketByGroup(refs)
+	if skipped != 3 {
+		t.Fatalf("skipped = %d, want 3", skipped)
+	}
+	sum := 0
+	for _, b := range buckets {
+		for _, ref := range b {
+			if ref == nil {
+				t.Fatal("nil ref must not survive into a bucket")
+			}
+		}
+		sum += len(b)
+	}
+	if sum != 3 {
+		t.Fatalf("total = %d, want 3 (non-nil refs must all survive)", sum)
 	}
 }
 
 // 空收件人列表不得产生桶，也不得 panic。
 func TestBucketByGroupEmpty(t *testing.T) {
 	s, _ := newUnstartedSingleGroupSystem(t)
-	buckets := s.bucketByGroup(nil)
+	buckets, skipped := s.bucketByGroup(nil)
+	if skipped != 0 {
+		t.Fatalf("skipped = %d, want 0", skipped)
+	}
 	if len(buckets) != 1 || len(buckets[0]) != 0 {
 		t.Fatalf("buckets = %v, want one empty bucket", buckets)
 	}
@@ -564,5 +607,48 @@ func TestGroupMailboxHighWaterMarkWarnsOnly(t *testing.T) {
 		}
 	default:
 		t.Fatal("expected a high water warning")
+	}
+}
+
+// 过载丢弃必须报告自己的错误码。复用 SystemNotStarted 会让调用方把"消费者太慢"
+// 读成"系统没启动"，从而走完全错误的处置路径（重试/重建 vs 扩容/提速）。
+func TestGroupMailboxOverflowReportsDedicatedErrorCode(t *testing.T) {
+	const depth = 2
+	s, group := newUnstartedSingleGroupSystem(t, func(sc *SystemConfig) {
+		sc.MaxMailboxDepth = depth
+	})
+	limit := depth * GroupMailboxDepthFactor
+	for i := 0; i < limit; i++ {
+		if err := s.LocalRouter(&EnvelopeSend{ToActorRef: testActorRef(ActorTypeStart+1, "a"), Message: "m"}); err != nil {
+			t.Fatalf("enqueue %d below the limit should succeed, got %v", i, err)
+		}
+	}
+	err := s.LocalRouter(&EnvelopeSend{ToActorRef: testActorRef(ActorTypeStart+1, "a"), Message: "m"})
+	if err == nil || err.Code() != ErrorCodeMailboxOverflow {
+		t.Fatalf("overflow must report ErrorCodeMailboxOverflow, got %v", err)
+	}
+	if got := group.mailbox.Len(); got != limit {
+		t.Fatalf("depth = %d, want %d", got, limit)
+	}
+}
+
+// 停机中（mailbox 已关闭）与"未 Start"仍归为 SystemNotStarted，不得与过载混在一起。
+func TestLocalRouterClosedMailboxReportsSystemNotStarted(t *testing.T) {
+	s, group := newUnstartedSingleGroupSystem(t, func(sc *SystemConfig) {
+		sc.MaxMailboxDepth = 1
+	})
+	group.mailbox.Close()
+	err := s.LocalRouter(&EnvelopeSend{ToActorRef: testActorRef(ActorTypeStart+1, "a"), Message: "m"})
+	if err == nil || err.Code() != ErrorCodeSystemNotStarted {
+		t.Fatalf("closed mailbox must report ErrorCodeSystemNotStarted, got %v", err)
+	}
+}
+
+// 缺少目标的信封按"引用非法"上报，与 dvactor Router 对同一情形的错误码一致。
+func TestLocalRouterNilTargetReportsInvalidActor(t *testing.T) {
+	s, _ := newUnstartedSingleGroupSystem(t)
+	err := s.LocalRouter(&EnvelopeSend{ToActorRef: nil, Message: "m"})
+	if err == nil || err.Code() != ErrorCodeInvalidActor {
+		t.Fatalf("nil target must report ErrorCodeInvalidActor, got %v", err)
 	}
 }

@@ -313,7 +313,7 @@ func TestPendingRequestPreventsRecycle(t *testing.T) {
 }
 
 // 回归测试：响应无处可投（请求没有发送方）时，请求计数仍必须归还。
-// 修复前 Response 提前 return 跳过了 processingRequestCount--，
+// 修复前 Response 提前 return 跳过了未应答请求的销账，
 // 该 actor 从此永远满足不了回收条件（永久泄漏）。
 func TestUndeliverableResponseReleasesRequestCount(t *testing.T) {
 	const noFromType vactor.ActorType = 130
