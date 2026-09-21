@@ -138,3 +138,17 @@ func BenchmarkMailboxRoundTrip(b *testing.B) {
 		}
 	}
 }
+
+// O4 的判定口径：FireEvent/ListenEvent 每次都新建 EventHub 引用（一次 FNV + 一次分配）。
+// 这里只量"造引用"本身，不掺投递与调度：如果它在事件热路径里占比可忽略，O4 就不该做。
+func BenchmarkCreateEventHubRef(b *testing.B) {
+	s := vactor.NewSystem(func(sc *vactor.SystemConfig) {
+		sc.LogFunc = func(vactor.LogLevel, string, ...interface{}) {}
+	})
+	group := vactor.EventGroup("match-1")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = s.CreateActorRef(vactor.EventHubActorType, vactor.ActorId(group))
+	}
+}
