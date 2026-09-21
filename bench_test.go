@@ -116,3 +116,25 @@ func BenchmarkActorSend(b *testing.B) {
 		runtime.Gosched()
 	}
 }
+
+// 单 goroutine 闭环的 mailbox 吞吐基准：入队 N 条、整批取走、再入队。
+//
+// 为什么要单独有这一条：BenchmarkActorSend 走的是"跨 goroutine 投递 + 唤醒"，
+// 端到端时延里调度噪声占主导（本机实测 150~1000ns 摆动），20~30ns 量级的改动
+// 根本分辨不出来。环形索引、锁这类 micro 成本必须有一个不掺调度噪声的对照口径。
+func BenchmarkMailboxRoundTrip(b *testing.B) {
+	const batch = 64
+	q := vactor.NewQueue[vactor.Envelope]()
+	env := &vactor.EnvelopeSend{Message: "m"}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for j := 0; j < batch; j++ {
+			q.Enqueue(env)
+		}
+		drained, ok := q.TryDequeueAll()
+		if !ok || len(drained) != batch {
+			b.Fatalf("drained %d envelopes (ok=%v), want %d", len(drained), ok, batch)
+		}
+	}
+}

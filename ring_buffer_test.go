@@ -227,3 +227,52 @@ func TestRingBufferPushGrow(t *testing.T) {
 		}
 	}
 }
+
+// 容量被向上取整到 2 的幂（环形索引改用位与的前提）。非 2 幂入参、以及跨扩容
+// 之后的回绕都必须仍然正确——位与一旦对上界有假设，出错方式就是静默丢数据。
+func TestRingBufferNonPowerOfTwoCapacity(t *testing.T) {
+	rb := vactor.NewRingBuffer[int](3)
+	if got := rb.Size(); got != 4 {
+		t.Fatalf("capacity = %d, want 4 (rounded up to a power of two)", got)
+	}
+	// 反复回绕 + 扩容，校验顺序与内容完整
+	want := 0
+	popped := 0
+	for round := 0; round < 50; round++ {
+		n := round % 7
+		for i := 0; i < n; i++ {
+			rb.Push(want)
+			want++
+		}
+		for i := 0; i < n/2; i++ {
+			v, ok := rb.Pop()
+			if !ok {
+				t.Fatalf("round %d pop %d: buffer reported empty", round, i)
+			}
+			if v != popped {
+				t.Fatalf("round %d pop %d = %d, want %d (order broken)", round, i, v, popped)
+			}
+			popped++
+		}
+	}
+	// 排空后内容必须与写入顺序一致
+	for rb.Count() > 0 {
+		_, _ = rb.Pop()
+	}
+	start := 900
+	for i := 0; i < 25; i++ {
+		rb.Push(start + i) // 跨过 2 的幂边界触发扩容
+	}
+	got := rb.GetAll()
+	if len(got) != 25 {
+		t.Fatalf("GetAll len = %d, want 25", len(got))
+	}
+	for i, v := range got {
+		if v != start+i {
+			t.Fatalf("element %d = %d, want %d (order broken by wrap/grow)", i, v, start+i)
+		}
+	}
+	if s := rb.Size(); s&(s-1) != 0 {
+		t.Fatalf("size %d is not a power of two", s)
+	}
+}
